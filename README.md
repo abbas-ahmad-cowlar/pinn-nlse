@@ -55,3 +55,73 @@ A more detailed log-scale error map and three cross-section overlays at
 ξ = 0, 2.5, 5 are saved to
 [`figures/error_map_soliton.png`](figures/error_map_soliton.png) and
 [`figures/cross_section_soliton.png`](figures/cross_section_soliton.png).
+
+## The physics
+
+The normalized NLSE (Agrawal sign convention, `s = -sign(β₂)`):
+
+$$
+i\,\frac{\partial u}{\partial \xi}
+\;+\; \frac{s}{2}\,\frac{\partial^2 u}{\partial \tau^2}
+\;+\; N^2\,|u|^2\,u
+\;=\; 0
+$$
+
+For anomalous dispersion (`s = +1`) and `N = 1`, dispersion and Kerr
+nonlinearity exactly balance and the closed-form fundamental soliton is
+`u(ξ, τ) = sech(τ) · exp(iξ/2)` — an exact propagation of the input pulse.
+The full physics derivation — including SVEA, the co-moving frame, dispersion
+length `L_D`, nonlinear length `L_NL`, soliton number `N² = L_D/L_NL`, and the
+real/imaginary residual derivation — is summarized in
+[`report/technical_report.md`](report/technical_report.md).
+
+## How to reproduce
+
+Three intended paths, with very different costs:
+
+### Path A — Read-only verification (~30 s, or ~1 min on a fresh clone)
+
+The fastest reproduction loads pretrained weights from `models/published/`
+and the saved SSFM ground truth, then renders the comparison figures and
+prints the metrics. No retraining.
+
+```bash
+git clone <repo> && cd 3-PINN_NLSE
+python -m venv venv && . venv/Scripts/activate   # Windows
+# or: source venv/bin/activate                   # Unix / macOS
+pip install -r requirements.txt
+pip install -e .
+python -m ipykernel install --user --name pinn-nlse --display-name "Python 3 (PINN-NLSE)"
+jupyter notebook notebooks/03_comparison.ipynb     # Restart & Run All
+```
+
+For a pure-CLI reproduction:
+
+```bash
+python -m src.compare --case all              # regenerates comparison figures + metrics
+```
+
+> **First-clone note**: the four SSFM ground-truth `.npz` datasets
+> (~46 MB total) are now whitelisted in `.gitignore` and shipped with the
+> repo. If you cloned from a stripped release where they were excluded,
+> `python -m src.compare --case all` and `notebooks/03_comparison.ipynb`
+> will **auto-regenerate** them via `src.generate_ground_truth.generate_all()`
+> (~30 s on CPU, deterministic). You can also explicitly run
+> `notebooks/01_ssfm_validation.ipynb` first to regenerate them under your
+> own control. Either path keeps published artifacts untouched.
+
+For a scriptable verification run, use the read-only pytest subset in the
+test-suite section below, followed by `python -m src.compare --case all` if you
+want freshly rendered comparison figures.
+
+### Path B — Smoke pipeline test (~2 min)
+
+Sanity-check that everything wires together using a 1000-collocation × 500-
+Adam-step pipeline on a mini 3 × 64 model. Final rel L2 will be ~85 % (the
+model is undertrained by design); the goal is to confirm autograd, the
+optimizer, and the artifact pipeline all work end-to-end.
+
+```bash
+python -m src.train --case soliton --profile smoke --run-tag smoke-test
+python -m src.train --case gaussian_dispersion --profile smoke --run-tag smoke-test
+```
