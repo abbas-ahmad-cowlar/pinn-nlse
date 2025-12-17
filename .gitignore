@@ -1,0 +1,68 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+jupyterlab_*.log
+notebooks/04_parameter_sweep.ipynb
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Private/local archive
+.private_archive/
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Model/checkpoint outputs
+models/checkpoints/
+*.pt
+*.pth
+*.ckpt
+# Whitelist: frozen published weights used by tests/notebooks
+!models/.gitkeep
+!models/published/
+!models/published/**
+
+# Per-run artifact archives (auto-created by training when overwriting an existing artifact)
+**/*.archived-*
+
+# Training logs
+logs/*
+!logs/.gitkeep
+!logs/published/
+!logs/published/**
+!logs/speed_benchmark.json
+logs/*.tmp
+logs/*.bak
+logs/*.log
+
+# Data files (large binary ground-truth artifacts)
+*.hdf5
+*.h5
+*.npz
+!data/.gitkeep
+!data/provenance.json
+# Whitelist: the 4 canonical ground-truth datasets (~12 MB each, needed for clean-clone audit)
+!data/soliton_ground_truth.npz
+!data/dispersion_broadening_ground_truth.npz
+!data/spm_ground_truth.npz
+!data/gaussian_nonlinear_ground_truth.npz
