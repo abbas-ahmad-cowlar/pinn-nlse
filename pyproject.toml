@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pinn-nlse"
+version = "0.1.0"
+requires-python = ">=3.10"
+
+[project.scripts]
+pinn-nlse-train = "src.train:main"
+pinn-nlse-compare = "src.compare:main"
