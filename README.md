@@ -125,3 +125,84 @@ optimizer, and the artifact pipeline all work end-to-end.
 python -m src.train --case soliton --profile smoke --run-tag smoke-test
 python -m src.train --case gaussian_dispersion --profile smoke --run-tag smoke-test
 ```
+
+### Path C — Full retrain on CPU (~35 min)
+
+This reproduces the published metrics. Wall time on a 4-core CPU is **~17 min
+per case**. On a GPU expect **30–60 s per case** with no code changes
+(PyTorch picks up CUDA automatically).
+
+```bash
+python -m src.train --case soliton --profile baseline --data-augmented
+python -m src.train --case gaussian_dispersion --profile baseline --data-augmented
+python -m src.compare --case all
+python -m src.benchmark            # ~6 min on CPU
+```
+
+> ⚠️ **Without `--run-tag`, Path C OVERWRITES the canonical files in
+> `models/`, `logs/`, and `figures/`.** It does **NOT** touch
+> `models/published/`, `logs/published/`, or `figures/published/` — those are
+> frozen. The canonical files are auto-archived with a UTC timestamp before
+> being overwritten (`*.archived-<UTC>.<ext>`, gitignored, recoverable on
+> disk). To do a clean independent run that touches nothing else, append a
+> tag:
+
+```bash
+python -m src.train --case soliton --profile baseline --data-augmented --run-tag verify-2026-05-10
+```
+
+That writes only to `models/soliton_data_augmented__verify-2026-05-10_*.pt`
+and the matching log / figure paths.
+
+## What gets written where
+
+| Path | Written by | Published artifact behavior |
+|------|------------|-------------|
+| `models/published/<case>_data_augmented_final.pt` | nothing — frozen | never touched |
+| `logs/published/*.json` | nothing — frozen | never touched |
+| `figures/published/*.png` | nothing — frozen | never touched |
+| `models/<case>_data_augmented_final.pt` | `python -m src.train --data-augmented` | overwrites with auto-archive |
+| `logs/<case>_data_augmented_training_*.json` | same | overwrites with auto-archive |
+| `figures/pinn_training_loss_<case>.png` | same | overwrites with auto-archive |
+| `figures/comparison_*.png`, `figures/error_map_*.png`, `figures/cross_section_*.png` | `python -m src.compare` | overwrites with auto-archive |
+| `figures/speed_benchmark.png`, `logs/speed_benchmark.json` | `python -m src.benchmark` | overwrites with auto-archive |
+| `models/<case>_*__<tag>_*.pt` etc. | `--run-tag <tag>` runs | unique per-run |
+| `*.archived-<UTC>.<ext>` | auto-saved before any overwrite | gitignored, recoverable |
+
+## Project layout
+
+```text
+pinn-nlse/
+├── README.md                          # this file
+├── report/technical_report.md         # 5-page write-up
+├── requirements.txt
+├── pyproject.toml
+├── src/
+│   ├── config.py                      # physical + training-profile parameters
+│   ├── utils.py                       # grid helpers, plotting, error metrics
+│   ├── nlse_utils.py                  # imported from companion SSFM project
+│   ├── ssfm.py                        # imported from companion SSFM project
+│   ├── data_gen.py                    # collocation/IC/BC/data-point generators
+│   ├── pinn_nlse.py                   # PINN model + autograd residual
+│   ├── train.py                       # Adam + L-BFGS, with --run-tag and auto-archive
+│   ├── generate_ground_truth.py       # regenerate the data/*.npz datasets
+│   ├── compare.py                     # CLI for the comparison figures + metrics
+│   └── benchmark.py                   # SSFM-vs-PINN speed benchmark
+├── data/
+│   ├── *.npz                          # SSFM ground-truth (regen via notebook 01)
+│   └── provenance.json                # source commit + path of imported SSFM
+├── models/
+│   ├── published/                     # frozen canonical weights
+│   └── *.pt                           # latest local training output
+├── logs/
+│   ├── published/                     # frozen canonical training history + metadata
+│   └── *.json                         # latest local training output
+├── figures/
+│   ├── published/                     # frozen canonical figures
+│   └── *.png                          # latest local figures and retrains
+├── notebooks/
+│   ├── 01_ssfm_validation.ipynb       # SSFM import + ground-truth regeneration
+│   ├── 02_pinn_training.ipynb         # PINN training results + loss curves
+│   └── 03_comparison.ipynb            # SSFM-vs-PINN comparison notebook
+└── tests/                             # 68 pytest tests
+```
