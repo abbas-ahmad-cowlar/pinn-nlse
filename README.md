@@ -206,3 +206,65 @@ pinn-nlse/
 │   └── 03_comparison.ipynb            # SSFM-vs-PINN comparison notebook
 └── tests/                             # 68 pytest tests
 ```
+
+## Test suite
+
+The suite has two clearly separated subsets:
+
+**Read-only verification subset (~15 s, no artifacts touched)**
+
+```bash
+pytest tests/test_utils.py tests/test_data_gen.py tests/test_ssfm_import.py \
+       tests/test_pinn_residual.py tests/test_training_smoke.py \
+       tests/test_artifact_inventory.py
+```
+
+These 63 tests load existing artifacts and check invariants (residual = 0
+on analytical solutions, schema validation, presence of every required
+figure/notebook/log file). Nothing on disk is rewritten.
+
+**Full suite, including comparison-CLI side-effects (~36 s)**
+
+```bash
+pytest tests/                          # 68 tests, ~36 s on CPU
+```
+
+The 5 extra tests in `tests/test_compare_cli.py` actually invoke
+`generate_soliton_comparison()` / `generate_gaussian_dispersion_comparison()`,
+which **regenerates the comparison/error/cross-section figures** in
+`figures/`. Thanks to the auto-archive safeguard (every overwrite renames
+the prior file to `*.archived-<UTC>.png` first), no published artifact is
+lost — and `figures/published/` is never touched. But the figures in
+`figures/` will be rewritten with fresh timestamps. Use the read-only
+subset above for strictly hands-off verification.
+
+Test coverage:
+- 8 utility tests (grid creation, sech, error metrics)
+- 14 data-generator tests (collocation, IC, BC, schema, dataset/model guards)
+- 7 SSFM-import tests (signature, soliton acid, energy conservation)
+- 4 PINN residual tests (residual = 0 on N=1 soliton + linear Gaussian)
+- 3 training smoke tests (per-term finite loss, Adam decreases loss)
+- **5 comparison-CLI tests** (resolver, CLI help, end-to-end metrics) —
+  these are the ones that touch `figures/`
+- **27 inventory tests** (every required figure / notebook / log /
+  weight file) — strictly read-only
+
+## Key references
+
+[1] G. P. Agrawal, *Nonlinear Fiber Optics*, 6th ed. (Academic Press, 2019).
+
+[2] M. Raissi, P. Perdikaris, and G. E. Karniadakis, "Physics-informed neural
+networks: A deep learning framework for solving forward and inverse problems
+involving nonlinear partial differential equations," *Journal of
+Computational Physics* 378, 686–707 (2019).
+
+[3] X. Jiang et al., "Physics-informed Neural Network for Nonlinear Dynamics
+in Fiber Optics," *Laser & Photonics Reviews* (2022); arXiv:2109.00526.
+
+[4] J. Pu, J. Li, and Y. Chen, "Solving localized wave solutions of the
+derivative nonlinear Schrödinger equation using an improved PINN method,"
+arXiv:2101.08593 (2021).
+
+## License
+
+MIT; see [`LICENSE`](LICENSE).
