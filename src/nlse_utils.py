@@ -118,3 +118,79 @@ def sech_pulse(tau, amplitude=1.0):
     """
     abs_tau = np.abs(tau)
     sech = 2 * np.exp(-abs_tau) / (1 + np.exp(-2 * abs_tau))
+    return (amplitude * sech).astype(np.complex128)
+
+
+def compute_energy(u, dtau):
+    """Compute total pulse energy (conserved quantity of the NLSE).
+
+    Physics:
+        The NLSE conserves the integral E = integral |u(xi,tau)|^2 dtau during
+        propagation. This is analogous to probability conservation
+        integral |psi|^2 dx = 1 in quantum mechanics. If E(xi)/E(0) drifts
+        from 1.0, the solver has a bug.
+
+        Formula: E = sum |u_k|^2 * dtau (rectangular quadrature)
+
+    Args:
+        u (np.ndarray): Complex pulse envelope array of shape (N_t,).
+        dtau (float): Time step size from create_grid().
+
+    Returns:
+        energy (float): Total pulse energy (dimensionless in normalized units).
+    """
+    return np.sum(np.abs(u)**2) * dtau
+
+
+def compute_spectrum(u):
+    """Compute unnormalized plotting spectrum |FFT(u)|^2 with zero-frequency centered.
+
+    Physics:
+        The power spectrum |U(omega)|^2 shows the frequency content of the pulse.
+        Under SPM-only propagation, the spectrum broadens while the temporal
+        shape |u(tau)|^2 stays constant. The spectrum is fftshift-ed so that
+        omega = 0 is at the center -- suitable for direct plotting.
+
+    Args:
+        u (np.ndarray): Complex pulse envelope array of shape (N_t,).
+
+    Returns:
+        spectrum (np.ndarray): Unnormalized plotting spectrum |U(omega)|^2 of shape
+            (N_t,), with zero-frequency at the center (fftshift applied).
+    """
+    U = np.fft.fftshift(np.fft.fft(u))
+    return np.abs(U)**2
+
+
+def compute_spectrum_density(u, dtau):
+    """Compute dtau-normalized spectral intensity for Parseval checks.
+
+    Uses the Fourier convention U(omega) = (1/sqrt(2pi)) integral u(tau) exp(-i*omega*tau) dtau.
+    With domega = 2pi/(N*dtau), sum(|U|^2)*domega should match
+    sum(|u|^2)*dtau to numerical precision for well-resolved pulses.
+    """
+    U = np.fft.fftshift(np.fft.fft(u)) * dtau / np.sqrt(2 * np.pi)
+    return np.abs(U)**2
+
+
+def normalized_spectrum(u):
+    """Return fftshifted |FFT(u)|^2 normalized to a peak of 1 for plotting."""
+    spectrum = compute_spectrum(u)
+    peak = np.max(spectrum)
+    if peak == 0:
+        return spectrum
+    return spectrum / peak
+
+
+def rms_width(u, tau, dtau):
+    """Compute RMS pulse width using intensity-weighted moments.
+
+    Args:
+        u (np.ndarray): Complex pulse envelope.
+        tau (np.ndarray): Time grid.
+        dtau (float): Time step.
+
+    Returns:
+        sigma (float): RMS pulse width.
+    """
+    intensity = np.abs(u)**2
