@@ -106,3 +106,63 @@ TRAINING_PROFILES = {
         "RESAMPLE_EVERY": None,
     },
     "baseline": {
+        # CPU-friendly compromise: 10000+200 is supported, but on an unaccelerated
+        # CPU it takes ~2 hours per case. Empirically, the loss curve at
+        # 5000 collocation reaches ~3e-4 by Adam step 2300 (see logs/soliton_baseline_run.log
+        # from the killed initial run), so 3000 Adam + 50 LBFGS captures the bulk of
+        # convergence in ~25 min/case. Bump back to (10000, 200) on a GPU machine
+        # for the published "full" run.
+        "N_COLLOCATION": 5000,
+        "N_IC_POINTS": 250,
+        "N_BC_POINTS": 100,
+        "N_EPOCHS_ADAM": 3000,
+        "N_STEPS_LBFGS": 50,
+        "LOG_EVERY": LOG_EVERY,
+        "LBFGS_HISTORY_SIZE": 15,
+        "LBFGS_MAX_COLLOCATION": 5000,
+        "RESAMPLE_EVERY": 1000,
+    },
+    "full": {
+        "N_COLLOCATION": N_COLLOCATION,
+        "N_IC_POINTS": N_IC_POINTS,
+        "N_BC_POINTS": N_BC_POINTS,
+        "N_EPOCHS_ADAM": N_EPOCHS_ADAM,
+        "N_STEPS_LBFGS": N_STEPS_LBFGS,
+        "LOG_EVERY": LOG_EVERY,
+        "LBFGS_HISTORY_SIZE": 50,
+        "LBFGS_MAX_COLLOCATION": 5000,
+        "RESAMPLE_EVERY": 2000,
+    },
+}
+
+# ==============================================================
+# GROUP 4: SI Unit Conversion (Reference Only)
+# ==============================================================
+
+# Typical SMF-28 fiber parameters (for reference and conversion)
+BETA2_SI = -20e-27      # GVD parameter [s^2/m] = -20 ps^2/km
+GAMMA_SI = 2e-3         # Nonlinear coefficient [W^-1 m^-1] = 2 W^-1 km^-1
+T0_SI = 10e-12          # Input pulse width [s] = 10 ps
+L_D_SI = T0_SI**2 / abs(BETA2_SI)            # Dispersion length [m]
+P0_SI = abs(BETA2_SI) / (GAMMA_SI * T0_SI**2)  # Peak power for N=1 [W]
+L_NL_SI = 1.0 / (GAMMA_SI * P0_SI)           # Nonlinear length [m]
+
+
+def normalized_to_si(xi, tau, u):
+    """
+    Convert normalized coordinates to SI units.
+
+    Args:
+        xi: Normalized distance (z / L_D)
+        tau: Normalized time (t / T_0)
+        u: Normalized field (A / sqrt(P_0))
+
+    Returns:
+        z_m: Distance in meters
+        t_s: Time in seconds
+        A_sqrt_W: Field amplitude in sqrt(W)
+    """
+    z_m = xi * L_D_SI
+    t_s = tau * T0_SI
+    A_sqrt_W = u * np.sqrt(P0_SI)
+    return z_m, t_s, A_sqrt_W
