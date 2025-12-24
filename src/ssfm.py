@@ -159,3 +159,43 @@ def ssfm_propagate(u0, tau, omega, xi_max, N_z, s=1, N_sq=1.0,
         raise ValueError(
             "omega must match 2*pi*np.fft.fftfreq(len(tau), d=dtau)"
         )
+    if not np.isfinite(s) or not np.isfinite(N_sq):
+        raise ValueError("s and N_sq must be finite numbers")
+    if N_sq < 0:
+        raise ValueError("N_sq must be non-negative")
+    if not isinstance(save_every, (int, np.integer)) or save_every <= 0:
+        raise ValueError("save_every must be a positive integer")
+
+    dxi = xi_max / N_z
+
+    xi_array = np.linspace(0, xi_max, N_z + 1)
+    save_steps = list(range(0, N_z + 1, save_every))
+    if save_steps[-1] != N_z:
+        save_steps.append(N_z)
+    save_step_set = set(save_steps)
+    if return_history:
+        xi_saved = xi_array[save_steps]
+        u_history = np.zeros((len(save_steps), len(u0)), dtype=np.complex128)
+        u_history[0] = u0.copy()
+        save_idx = 1
+
+    # Precompute the Strang half-step dispersion phase once per run.
+    # This is exp(-i*s*omega^2*dxi/4), equivalent to dxi_half=dxi/2.
+    half_dispersion_phase = np.exp(-1j * s * omega**2 * dxi / 4)
+
+    u = u0.copy()
+    for i in range(N_z):
+        # Symmetric split-step: D/2 -> N -> D/2
+        u = np.fft.ifft(np.fft.fft(u) * half_dispersion_phase)
+        u = nonlinear_step(u, N_sq, dxi)
+        u = np.fft.ifft(np.fft.fft(u) * half_dispersion_phase)
+        step = i + 1
+        if callback is not None:
+            callback(step, xi_array[step], u.copy())
+        if return_history and step in save_step_set:
+            u_history[save_idx] = u.copy()
+            save_idx += 1
+
+    if return_history:
+        return xi_saved, u_history
+    return xi_max, u
