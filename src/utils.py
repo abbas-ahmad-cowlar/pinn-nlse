@@ -211,3 +211,89 @@ def plot_spectrum_evolution(u_zt, tau, xi, title="Spectral Evolution",
         plt.show()
     return fig, ax
 
+
+def plot_comparison(u_ssfm, u_pinn, tau, xi, xi_slice=None,
+                    title="PINN vs SSFM", save_path=None,
+                    show=True, tau_lim=None):
+    """
+    Side-by-side comparison of PINN prediction vs SSFM ground truth.
+
+    Generates a 3-panel figure:
+      Left:   |u_SSFM|^2 propagation map
+      Center: |u_PINN|^2 propagation map
+      Right:  log10|u_PINN - u_SSFM|^2 error map
+
+    Args:
+        u_ssfm: 2D complex array (N_z+1, N_t) - SSFM ground truth
+        u_pinn: 2D complex array (N_z+1, N_t) - PINN prediction
+        tau: 1D time array
+        xi: 1D distance array
+        xi_slice: Optional index for cross-section comparison overlay
+        title: Figure title
+        save_path: Optional save path
+        show: Whether to call plt.show()
+        tau_lim: Optional x-axis limits, e.g. (-10, 10) for the central pulse region.
+
+    Returns:
+        (fig, axes) matplotlib handles
+    """
+    import os
+    import matplotlib.pyplot as plt
+
+    int_ssfm = np.abs(u_ssfm) ** 2
+    int_pinn = np.abs(u_pinn) ** 2
+    error = np.abs(u_pinn - u_ssfm) ** 2
+
+    if xi_slice is not None and not (0 <= xi_slice < len(xi)):
+        raise IndexError(f"xi_slice={xi_slice} outside valid range [0, {len(xi)-1}]")
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+    im0 = axes[0].pcolormesh(tau, xi, int_ssfm, shading='auto', cmap='hot')
+    axes[0].set_title("SSFM (Ground Truth)", fontsize=13)
+    axes[0].set_xlabel(r'$\tau$'); axes[0].set_ylabel(r'$\xi$')
+    if tau_lim is not None:
+        axes[0].set_xlim(*tau_lim)
+    fig.colorbar(im0, ax=axes[0])
+
+    im1 = axes[1].pcolormesh(tau, xi, int_pinn, shading='auto', cmap='hot')
+    axes[1].set_title("PINN Prediction", fontsize=13)
+    axes[1].set_xlabel(r'$\tau$')
+    if tau_lim is not None:
+        axes[1].set_xlim(*tau_lim)
+    fig.colorbar(im1, ax=axes[1])
+
+    im2 = axes[2].pcolormesh(tau, xi, np.log10(error + 1e-16),
+                             shading='auto', cmap='magma', vmin=-8, vmax=0)
+    axes[2].set_title("Log Error: log10|PINN - SSFM|^2", fontsize=13)
+    axes[2].set_xlabel(r'$\tau$')
+    if tau_lim is not None:
+        axes[2].set_xlim(*tau_lim)
+    fig.colorbar(im2, ax=axes[2], label=r'$\log_{10}|u_{PINN}-u_{SSFM}|^2$')
+
+    if xi_slice is not None:
+        xi_val = xi[xi_slice]
+        for ax in axes:
+            ax.axhline(xi_val, color='white', lw=1.2, ls='--', alpha=0.8)
+        inset = axes[2].inset_axes([0.08, -0.55, 0.84, 0.35])
+        inset.plot(tau, int_ssfm[xi_slice], 'k-', lw=1.5, label='SSFM')
+        inset.plot(tau, int_pinn[xi_slice], 'r--', lw=1.5, label='PINN')
+        inset.set_title(fr'Cross-section at $\xi={xi_val:.2f}$', fontsize=10)
+        inset.set_xlabel(r'$\tau$', fontsize=9)
+        inset.set_ylabel(r'$|u|^2$', fontsize=9)
+        inset.legend(fontsize=8)
+
+    fig.suptitle(title, fontsize=16, y=1.02)
+    plt.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        fig.savefig(save_path, dpi=300, bbox_inches='tight')
+    if show:
+        plt.show()
+    return fig, axes
+
+
+# ==============================================================
+# Group 4: Error metrics
+# ==============================================================
