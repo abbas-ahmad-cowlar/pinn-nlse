@@ -129,3 +129,85 @@ def plot_propagation_map(u_zt, tau, xi, title="Pulse Propagation",
     intensity = np.abs(u_zt) ** 2
 
     fig, ax = plt.subplots(figsize=(10, 6))
+    im = ax.pcolormesh(tau, xi, intensity, shading='auto', cmap='hot')
+    ax.set_xlabel(r'Normalized time $\tau$', fontsize=14)
+    ax.set_ylabel(r'Normalized distance $\xi = z/L_D$', fontsize=14)
+    ax.set_title(title, fontsize=16)
+    if tau_lim is not None:
+        ax.set_xlim(*tau_lim)
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label(r'$|u(\xi, \tau)|^2$', fontsize=12)
+    plt.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        fig.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Figure saved to {save_path}")
+    if show:
+        plt.show()
+    return fig, ax
+
+
+def plot_spectrum_evolution(u_zt, tau, xi, title="Spectral Evolution",
+                            save_path=None, show=True, omega_lim=None,
+                            normalize=True, log_scale=False, floor_db=-80):
+    """
+    Plot spectral evolution |u_tilde(xi, omega)|^2 as a 2D colormap.
+
+    Args:
+        u_zt: 2D complex array (N_z+1, N_t)
+        tau: 1D time array (N_t,)
+        xi: 1D distance array (N_z+1,)
+        title: Plot title
+        save_path: Optional save path
+        show: Whether to call plt.show()
+        omega_lim: Optional x-axis limits for frequency. If None, show the full spectrum.
+        normalize: If True, divide spectrum by its global maximum before plotting.
+        log_scale: If True, plot 10*log10(normalized spectrum) with floor_db clipping.
+        floor_db: Lower plotting floor for log_scale.
+
+    Returns:
+        (fig, ax) matplotlib handles
+    """
+    import os
+    import matplotlib.pyplot as plt
+
+    dtau = tau[1] - tau[0]
+    omega = np.fft.fftshift(2 * np.pi * np.fft.fftfreq(len(tau), d=dtau))
+
+    spec = np.zeros_like(np.abs(u_zt) ** 2)
+    for i in range(u_zt.shape[0]):
+        spec[i, :] = np.abs(dtau * np.fft.fftshift(np.fft.fft(u_zt[i, :]))) ** 2
+
+    if normalize:
+        spec = spec / max(np.max(spec), np.finfo(float).tiny)
+
+    if log_scale:
+        plot_spec = 10 * np.log10(np.maximum(spec, 10 ** (floor_db / 10)))
+        cbar_label = r'$10\log_{10}(|\tilde{u}|^2 / \max|\tilde{u}|^2)$ [dB]'
+        vmin, vmax = floor_db, 0
+    else:
+        plot_spec = spec
+        cbar_label = (r'$|\tilde{u}(\xi, \omega)|^2$'
+                      if not normalize else r'Normalized $|\tilde{u}(\xi, \omega)|^2$')
+        vmin, vmax = None, None
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    im = ax.pcolormesh(omega, xi, plot_spec, shading='auto', cmap='viridis',
+                       vmin=vmin, vmax=vmax)
+    ax.set_xlabel(r'Normalized frequency $\omega$', fontsize=14)
+    ax.set_ylabel(r'$\xi = z/L_D$', fontsize=14)
+    ax.set_title(title, fontsize=16)
+    if omega_lim is not None:
+        ax.set_xlim(*omega_lim)
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label(cbar_label, fontsize=12)
+    plt.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        fig.savefig(save_path, dpi=300, bbox_inches='tight')
+    if show:
+        plt.show()
+    return fig, ax
+
