@@ -297,3 +297,68 @@ def plot_comparison(u_ssfm, u_pinn, tau, xi, xi_slice=None,
 # ==============================================================
 # Group 4: Error metrics
 # ==============================================================
+
+def compute_relative_l2_error(u_pred, u_true):
+    """
+    Compute the relative L2 error between predicted and true fields.
+
+    Error = ||u_pred - u_true||_2 / ||u_true||_2
+
+    Args:
+        u_pred: Predicted field (complex array)
+        u_true: True field (complex array)
+
+    Returns:
+        Relative L2 error (scalar, dimensionless)
+
+    Raises:
+        ValueError: if ||u_true|| = 0 (denominator would be zero)
+    """
+    denom = np.linalg.norm(u_true)
+    if denom == 0:
+        raise ValueError("Relative L2 denominator is zero.")
+    return np.linalg.norm(u_pred - u_true) / denom
+
+
+def compute_masked_relative_l2_error(u_pred, u_true, mask):
+    """
+    Compute relative L2 error only over a selected region.
+
+    Use this for pulse-region metrics so low-amplitude window tails do not
+    dominate the denominator or hide errors near the physical pulse.
+
+    Args:
+        u_pred: Predicted field (complex array)
+        u_true: True field (complex array)
+        mask: Boolean mask broadcastable to u_true / u_pred
+
+    Returns:
+        Relative L2 error on the selected mask
+    """
+    mask = np.broadcast_to(np.asarray(mask, dtype=bool), np.shape(u_true))
+    u_pred_m = u_pred[mask]
+    u_true_m = u_true[mask]
+    denom = np.linalg.norm(u_true_m)
+    if denom == 0:
+        raise ValueError("Masked relative L2 denominator is zero.")
+    return np.linalg.norm(u_pred_m - u_true_m) / denom
+
+
+def compute_error_metrics(u_pred, u_true):
+    """
+    Compute comprehensive error metrics for PINN vs SSFM comparison.
+
+    Args:
+        u_pred: Predicted field (complex array)
+        u_true: True field (complex array)
+
+    Returns:
+        dict with keys: 'mse', 'relative_l2', 'max_pointwise', 'mean_abs'
+    """
+    diff = u_pred - u_true
+    return {
+        'mse': np.mean(np.abs(diff) ** 2),
+        'relative_l2': compute_relative_l2_error(u_pred, u_true),
+        'max_pointwise': np.max(np.abs(diff)),
+        'mean_abs': np.mean(np.abs(diff)),
+    }
