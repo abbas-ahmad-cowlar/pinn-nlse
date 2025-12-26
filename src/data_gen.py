@@ -152,3 +152,69 @@ def generate_bc_points(N_bc: int, xi_max: float, tau_max: float,
     b = torch.zeros(N_bc, 1, device=device)
 
     return xi, tau, a, b
+
+
+# ---------------------------------------------------------------------------
+# Generator 4: Data points from SSFM ground truth
+# ---------------------------------------------------------------------------
+
+def generate_data_points(u_hist: np.ndarray, xi_arr: np.ndarray, tau: np.ndarray,
+                         N_data: int,
+                         device: str = "cpu",
+                         sampling: str = "pulse_region",
+                         tau_abs_max: float = 10.0,
+                         intensity_floor: float = 1e-4,
+                         exclude_initial_boundary: bool = True,
+                         rng: Optional[np.random.Generator] = None,
+                         seed: Optional[int] = None,
+                         exclude_flat_indices: Optional[Iterable[int]] = None,
+                         return_indices: bool = False):
+    """
+    Sample labeled data points from SSFM ground truth.
+
+    Samples N_data points from the SSFM solution grid and returns their
+    (xi, tau, Re(u), Im(u)) as PyTorch tensors. The default focuses
+    supervision on the physical pulse instead of spending most labels in
+    low-amplitude window tails.
+
+    Args:
+        u_hist: Complex array (N_z+1, N_t) from SSFM
+        xi_arr: Distance array (N_z+1,) from SSFM
+        tau: Time array (N_t,) from SSFM
+        N_data: Number of data points to sample
+        device: PyTorch device
+        sampling: 'uniform' or 'pulse_region'
+        tau_abs_max: Keep |tau| <= tau_abs_max when sampling='pulse_region'
+        intensity_floor: Keep points with |u|^2 >= intensity_floor * max(|u|^2)
+        exclude_initial_boundary: Avoid duplicating IC/BC losses in data points
+        rng: Optional np.random.Generator for reproducible sampling
+        seed: Optional seed used only when rng is not supplied
+        exclude_flat_indices: Optional iterable of flat SSFM-grid indices to remove
+            from the candidate pool. Use this to create held-out supervised
+            validation points disjoint from data-augmented training labels.
+        return_indices: If True, also return the sampled flat SSFM-grid indices.
+
+    Returns:
+        xi_data: Tensor (N_data, 1)
+        tau_data: Tensor (N_data, 1)
+        a_data: Tensor (N_data, 1), Re(u_ssfm)
+        b_data: Tensor (N_data, 1), Im(u_ssfm)
+        flat_idx: Optional NumPy array (N_data,) when return_indices=True
+    """
+    N_z_plus_1, N_t = u_hist.shape
+    candidate_mask = np.ones((N_z_plus_1, N_t), dtype=bool)
+
+    if sampling == "pulse_region":
+        candidate_mask &= np.abs(tau)[None, :] <= tau_abs_max
+        if intensity_floor is not None:
+            intensity = np.abs(u_hist) ** 2
+            candidate_mask &= intensity >= intensity_floor * np.max(intensity)
+    elif sampling != "uniform":
+        raise ValueError(f"Unknown sampling strategy: {sampling}")
+
+    if exclude_initial_boundary:
+        candidate_mask[0, :] = False     # exclude xi=0 (IC layer)
+        candidate_mask[:, 0] = False     # exclude tau = -tau_max (BC layer)
+        candidate_mask[:, -1] = False    # exclude tau = last grid point (BC-adjacent)
+
+    candidates = np.flatnonzero(candidate_mask.ravel())
