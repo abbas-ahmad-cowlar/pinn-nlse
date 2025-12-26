@@ -297,3 +297,73 @@ def load_ground_truth_npz(path: str):
 
     return data
 
+
+def assert_boundary_decay(data, tolerance: float = 1e-6) -> float:
+    """
+    Confirm that a dataset is compatible with zero temporal BCs.
+
+    SSFM is FFT-periodic, while the PINN uses u -> 0 at tau boundaries; this
+    check makes that approximation explicit. Zero Dirichlet temporal BCs are
+    accepted only when both the stored edge intensity and the analytical
+    far-field tail intensity are below `tolerance`. Failures are blocking —
+    increase TAU_MAX and regenerate before training.
+    """
+    edge = np.abs(np.concatenate(
+        [data["u_hist"][:, :2], data["u_hist"][:, -2:]], axis=1
+    )) ** 2
+    max_edge = float(np.max(edge))
+
+    tau_max = float(np.asarray(data["tau_max"]))
+    ic_type = str(np.asarray(data["ic_type"]))
+    if ic_type == "sech":
+        tail_amp = 2.0 * np.exp(-tau_max) / (1.0 + np.exp(-2.0 * tau_max))
+    elif ic_type == "gaussian":
+        tail_amp = np.exp(-0.5 * tau_max ** 2)
+    else:
+        tail_amp = max(abs(data["u_hist"][0, 0]), abs(data["u_hist"][0, -1]))
+    max_analytic_tail_intensity = float(abs(tail_amp) ** 2)
+
+    case_name = str(np.asarray(data["case_name"]))
+    if max_edge >= tolerance:
+        raise ValueError(
+            f"{case_name}: max boundary intensity {max_edge:.2e} >= "
+            f"{tolerance:.1e}; increase TAU_MAX and regenerate before "
+            "using zero temporal BCs"
+        )
+    if max_analytic_tail_intensity >= tolerance:
+        raise ValueError(
+            f"{case_name}: analytical +TAU_MAX tail intensity "
+            f"{max_analytic_tail_intensity:.2e} >= {tolerance:.1e}; increase TAU_MAX"
+        )
+    return max(max_edge, max_analytic_tail_intensity)
+
+
+def assert_case_matches_model(data, model, expected_ic_type: Optional[str] = None) -> bool:
+    """
+    Fail fast if a ground-truth dataset does not match the PINN physics.
+
+    Prevents silently comparing or supervising a model trained with one
+    sign/nonlinearity against SSFM data generated with another.
+    """
+    s_data = float(np.asarray(data["s"]))
+    N_sq_data = float(np.asarray(data["N_sq"]))
+    s_model = float(model.s)
+    N_sq_model = float(model.N_sq)
+
+    if not np.isclose(s_data, s_model):
+        raise ValueError(f"Dataset/model sign mismatch: data s={s_data}, model s={s_model}")
+
+    if not np.isclose(N_sq_data, N_sq_model):
+        raise ValueError(
+            f"Dataset/model nonlinearity mismatch: "
+            f"data N_sq={N_sq_data}, model N_sq={N_sq_model}"
+        )
+
+    if expected_ic_type is not None:
+        ic_type = str(np.asarray(data["ic_type"]))
+        if ic_type != expected_ic_type:
+            raise ValueError(
+                f"Dataset IC mismatch: data ic_type={ic_type}, expected {expected_ic_type}"
+            )
+
+    return True
