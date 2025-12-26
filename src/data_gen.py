@@ -218,3 +218,82 @@ def generate_data_points(u_hist: np.ndarray, xi_arr: np.ndarray, tau: np.ndarray
         candidate_mask[:, -1] = False    # exclude tau = last grid point (BC-adjacent)
 
     candidates = np.flatnonzero(candidate_mask.ravel())
+    if exclude_flat_indices is not None:
+        blocked = np.asarray(list(exclude_flat_indices), dtype=np.int64)
+        candidates = np.setdiff1d(candidates, blocked, assume_unique=False)
+
+    if len(candidates) == 0:
+        raise ValueError("No candidate SSFM data points available; relax sampling filters")
+
+    if rng is None:
+        rng = np.random.default_rng(seed)
+
+    replace = N_data > len(candidates)
+    flat_idx = rng.choice(candidates, size=N_data, replace=replace)
+    idx_z, idx_t = np.unravel_index(flat_idx, u_hist.shape)
+
+    xi_vals = xi_arr[idx_z]
+    tau_vals = tau[idx_t]
+    u_vals = u_hist[idx_z, idx_t]
+
+    xi_data = torch.tensor(xi_vals, dtype=torch.float32, device=device).unsqueeze(1)
+    tau_data = torch.tensor(tau_vals, dtype=torch.float32, device=device).unsqueeze(1)
+    a_data = torch.tensor(np.real(u_vals), dtype=torch.float32, device=device).unsqueeze(1)
+    b_data = torch.tensor(np.imag(u_vals), dtype=torch.float32, device=device).unsqueeze(1)
+
+    if return_indices:
+        return xi_data, tau_data, a_data, b_data, flat_idx
+    return xi_data, tau_data, a_data, b_data
+
+
+# ---------------------------------------------------------------------------
+# Helpers: ground-truth schema validation and dataset/model guards
+# ---------------------------------------------------------------------------
+
+REQUIRED_NPZ_KEYS = (
+    "schema_version", "case_name", "tau", "xi", "omega", "u_hist",
+    "dtau", "dxi", "N_T", "N_Z", "tau_max", "xi_max",
+    "s", "N_sq", "ic_type", "case_type", "dispersion_disabled", "equation",
+    "u_dtype", "tau_dtype", "max_boundary_intensity", "generated_at_utc",
+    "pinn_repo_commit", "ssfm_source_commit", "ssfm_source_path",
+)
+
+
+def load_ground_truth_npz(path: str):
+    """
+    Load and validate a ground-truth .npz file created by the SSFM generator.
+
+    Returns the loaded NumPy archive after checking the schema, coordinate
+    lengths, and u_hist shape. Tensor conversion happens in the data
+    generator functions, not here.
+    """
+    data = np.load(path, allow_pickle=False)
+
+    for key in REQUIRED_NPZ_KEYS:
+        if key not in data:
+            raise KeyError(f"{path} missing required key: {key}")
+
+    if data["u_hist"].shape != (len(data["xi"]), len(data["tau"])):
+        raise ValueError(
+            f"{path} has u_hist shape {data['u_hist'].shape}, "
+            f"expected ({len(data['xi'])}, {len(data['tau'])})"
+        )
+
+    if data["omega"].shape != data["tau"].shape:
+        raise ValueError(f"{path} omega shape must match tau shape")
+
+    if int(data["N_T"]) != len(data["tau"]) or int(data["N_Z"]) != len(data["xi"]) - 1:
+        raise ValueError(f"{path} grid metadata does not match stored arrays")
+
+    if not np.iscomplexobj(data["u_hist"]):
+        raise TypeError(f"{path} u_hist must be complex-valued")
+
+    if float(np.asarray(data["max_boundary_intensity"])) >= 1e-6:
+        raise ValueError(
+            f"{path} boundary leakage is too large for zero temporal BCs: "
+            f"{float(np.asarray(data['max_boundary_intensity'])):.2e}; "
+            "increase TAU_MAX and regenerate the dataset before using zero temporal BCs"
+        )
+
+    return data
+
