@@ -106,3 +106,58 @@ class PINN_NLSE(nn.Module):
         """Compute the NLSE physics residual using autograd.
 
         Computes:
+            r_a = -d_xi b + (s/2) d_tau^2 a + N_sq * (a^2 + b^2) * a
+            r_b = +d_xi a + (s/2) d_tau^2 b + N_sq * (a^2 + b^2) * b
+
+        Args:
+            xi: Tensor (N, 1) with requires_grad=True
+            tau: Tensor (N, 1) with requires_grad=True
+
+        Returns:
+            r_a: Tensor (N, 1), real part of the residual
+            r_b: Tensor (N, 1), imaginary part of the residual
+        """
+        a, b = self.forward(xi, tau)
+
+        ones = torch.ones_like(a)
+
+        # First derivatives in xi
+        da_dxi = torch.autograd.grad(
+            a, xi, grad_outputs=ones,
+            create_graph=True, retain_graph=True,
+        )[0]
+        db_dxi = torch.autograd.grad(
+            b, xi, grad_outputs=ones,
+            create_graph=True, retain_graph=True,
+        )[0]
+
+        # Second derivatives in tau (chain: first derivative, then differentiate again)
+        da_dtau = torch.autograd.grad(
+            a, tau, grad_outputs=ones,
+            create_graph=True, retain_graph=True,
+        )[0]
+        d2a_dtau2 = torch.autograd.grad(
+            da_dtau, tau, grad_outputs=ones,
+            create_graph=True, retain_graph=True,
+        )[0]
+
+        db_dtau = torch.autograd.grad(
+            b, tau, grad_outputs=ones,
+            create_graph=True, retain_graph=True,
+        )[0]
+        # Final derivative: omit retain_graph=True to reduce memory.
+        d2b_dtau2 = torch.autograd.grad(
+            db_dtau, tau, grad_outputs=ones,
+            create_graph=True,
+        )[0]
+
+        intensity = a ** 2 + b ** 2  # |u|^2
+
+        r_a = -db_dxi + (self.s / 2) * d2a_dtau2 + self.N_sq * intensity * a
+        r_b = +da_dxi + (self.s / 2) * d2b_dtau2 + self.N_sq * intensity * b
+
+        return r_a, r_b
+
+    def count_parameters(self) -> int:
+        """Count total trainable parameters."""
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
