@@ -169,3 +169,70 @@ def make_lbfgs_data(data_dict: dict,
     """
     out = dict(data_dict)
     n_current = int(out["xi_coll"].shape[0])
+    if n_current > max_collocation:
+        if collocation_sampler is None:
+            raise ValueError(
+                "collocation_sampler is required when reducing L-BFGS collocation size"
+            )
+        out["xi_coll"], out["tau_coll"] = collocation_sampler(max_collocation)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Training loops
+# ---------------------------------------------------------------------------
+
+def train_adam(model, data_dict, n_epochs, lr, lambdas, log_every=100,
+               checkpoint_every=None, checkpoint_dir="models/checkpoints",
+               case_name="model", collocation_sampler=None,
+               resample_every=None, residual_val_data=None):
+    """Train with Adam (stage 1: coarse convergence). Returns logged history."""
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    history: list[dict] = []
+
+    for epoch in range(1, n_epochs + 1):
+        if (collocation_sampler is not None and resample_every
+                and epoch > 1 and epoch % resample_every == 0):
+            data_dict["xi_coll"], data_dict["tau_coll"] = collocation_sampler()
+
+        optimizer.zero_grad()
+        clear_input_grads(data_dict)
+
+        total_loss, loss_dict = compute_total_loss(
+            model, **data_dict, lambdas=lambdas
+        )
+
+        if not torch.isfinite(total_loss):
+            raise FloatingPointError(
+                f"Non-finite Adam loss at epoch {epoch}: {loss_dict}"
+            )
+
+        total_loss.backward()
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
+        if not torch.isfinite(grad_norm):
+            raise FloatingPointError(f"Non-finite gradient norm at epoch {epoch}")
+        optimizer.step()
+        assert_finite_parameters(model, f"Adam epoch {epoch}")
+
+        if checkpoint_every and epoch % checkpoint_every == 0:
+            save_checkpoint(
+                model, optimizer,
+                os.path.join(checkpoint_dir, f"{case_name}_adam_{epoch:06d}.pt"),
+                epoch, loss_dict
+            )
+
+        if epoch % log_every == 0 or epoch == 1:
+            if residual_val_data is not None:
+                r_a_val, r_b_val = model.physics_residual(
+                    residual_val_data["xi_coll"], residual_val_data["tau_coll"]
+                )
+                loss_dict["phys_val"] = torch.mean(r_a_val ** 2 + r_b_val ** 2).item()
+            history.append({"epoch": epoch, **loss_dict})
+            print(f"[Adam {epoch:>6d}/{n_epochs}] "
+                  f"Total: {loss_dict['total']:.6f} | "
+                  f"Phys: {loss_dict['phys']:.6f} | "
+                  f"IC: {loss_dict['ic']:.6f} | "
+                  f"BC: {loss_dict['bc']:.6f}")
+
+    return history
+
