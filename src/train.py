@@ -101,3 +101,71 @@ def assert_finite_parameters(model, context: str) -> None:
         if not torch.isfinite(param).all():
             raise FloatingPointError(f"Non-finite parameter after {context}: {name}")
 
+
+def _archive_existing(path: str) -> Optional[str]:
+    """If path exists, rename it with a UTC timestamp suffix before overwriting.
+
+    Provides a free safety net so that running training again does not silently
+    wipe a previously published artifact. The archived file lives in the same
+    directory and matches the gitignore pattern ``**/*.archived-*``, so it does
+    not pollute the repository but is still recoverable on disk.
+    """
+    if not os.path.exists(path):
+        return None
+    stem, ext = os.path.splitext(path)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    archive_path = f"{stem}.archived-{timestamp}{ext}"
+    # os.replace is atomic on POSIX and Windows-safe (overwrites if target exists).
+    os.replace(path, archive_path)
+    print(f"  archived: {os.path.basename(path)} -> {os.path.basename(archive_path)}")
+    return archive_path
+
+
+def _safe_torch_save(state, path: str) -> None:
+    """Archive any existing artifact at `path` before writing the new state."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    _archive_existing(path)
+    torch.save(state, path)
+
+
+def _safe_write_json(payload: dict, path: str) -> None:
+    """Archive any existing artifact at `path` before writing the new JSON."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    _archive_existing(path)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+
+def _safe_save_figure(fig, path: str, dpi: int = 300) -> None:
+    """Archive any existing figure at `path` before saving the new figure."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    _archive_existing(path)
+    fig.savefig(path, dpi=dpi)
+
+
+def save_checkpoint(model, optimizer, path: str, step: int, loss_dict: dict) -> None:
+    """Save recoverable training state. Per-step checkpoints DO NOT auto-archive
+    (they overwrite cheaply during a single run). Use :func:`_safe_torch_save`
+    for canonical artifacts that should be preserved across runs.
+    """
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    torch.save({
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "step": step,
+        "loss": loss_dict,
+    }, path)
+
+
+def make_lbfgs_data(data_dict: dict,
+                    collocation_sampler: Optional[Callable] = None,
+                    max_collocation: int = 5000) -> dict:
+    """
+    Return a memory-bounded full-batch dataset for L-BFGS refinement.
+
+    If the Adam collocation set is larger than max_collocation, replace ONLY
+    the collocation tensors with a fresh smaller Sobol/random set; keep IC,
+    BC, and optional data labels unchanged.
+    """
+    out = dict(data_dict)
+    n_current = int(out["xi_coll"].shape[0])
