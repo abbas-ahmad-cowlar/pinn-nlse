@@ -386,3 +386,89 @@ def _evaluate_on_grid(model, gt, device):
 
 # ---------------------------------------------------------------------------
 # Case wrapper: N=1 soliton
+# ---------------------------------------------------------------------------
+
+def run_soliton_training(profile: str = "baseline", seed: int = 42,
+                         skip_lbfgs: bool = False,
+                         lbfgs_max_collocation: Optional[int] = None,
+                         data_augmented: bool = False,
+                         n_data_train: int = 500,
+                         n_data_val: int = 1000,
+                         run_tag: Optional[str] = None) -> dict:
+    """Train the PINN on the N=1 soliton case.
+
+    Args:
+        data_augmented: If True, add SSFM supervision (lambda_data=1.0) with
+            n_data_train points; metadata + artifacts are saved under the
+            soliton_data_augmented_* names.
+        n_data_train: Number of SSFM supervision points (used when data_augmented).
+        n_data_val: Number of held-out SSFM points used for supervised
+            validation MSE (always disjoint from training labels).
+        run_tag: Optional run identifier appended to artifact filenames so
+            independent verification runs do not overwrite the
+            canonical published artifacts. Without ``run_tag``, existing
+            canonical files are auto-archived with a UTC timestamp before
+            being overwritten.
+
+    Returns a dict with keys: case, model_path, history_path, metadata_path.
+    Asserts the artifacts exist before returning.
+    """
+    import matplotlib
+    if "ipykernel" not in sys.modules:
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from src.pinn_nlse import PINN_NLSE
+    from src.data_gen import (
+        generate_collocation_points, generate_ic_points, generate_bc_points,
+        generate_data_points,
+        load_ground_truth_npz, assert_boundary_decay, assert_case_matches_model,
+    )
+    from src.config import (
+        XI_MAX, TAU_MAX, S_SIGN, N_SOLITON, LEARNING_RATE,
+        LAMBDA_PHYSICS, LAMBDA_IC, LAMBDA_BC, LAMBDA_DATA,
+        CHECKPOINT_EVERY, FIGURE_PATHS,
+    )
+    from src.utils import compute_relative_l2_error, compute_masked_relative_l2_error
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[soliton] device = {device}{' (data-augmented)' if data_augmented else ''}")
+
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(seed)
+
+    cfg = _resolve_training_profile(profile)
+    lbfgs_max = (cfg["lbfgs_max_collocation"]
+                 if lbfgs_max_collocation is None else lbfgs_max_collocation)
+
+    def make_lambdas(data_weight=None):
+        return {
+            "phys": LAMBDA_PHYSICS, "ic": LAMBDA_IC, "bc": LAMBDA_BC,
+            "data": LAMBDA_DATA if data_weight is None else data_weight,
+        }
+
+    smoke_lambdas = make_lambdas(data_weight=0.0)
+    print(f"[soliton] running smoke preflight (1000 coll, 500 Adam steps)...")
+    _smoke_preflight(seed, "sech", S_SIGN, float(N_SOLITON ** 2),
+                     XI_MAX, TAU_MAX, LEARNING_RATE, device, smoke_lambdas)
+
+    model = PINN_NLSE(n_hidden=5, n_neurons=128, s=S_SIGN,
+                      N_sq=float(N_SOLITON ** 2),
+                      xi_max=XI_MAX, tau_max=TAU_MAX).to(device)
+    print(f"[soliton] params = {model.count_parameters():,}")
+
+    gt = load_ground_truth_npz("data/soliton_ground_truth.npz")
+    assert_boundary_decay(gt)
+    assert_case_matches_model(gt, model, expected_ic_type="sech")
+
+    coll_seed_state = {"value": seed}
+
+    def collocation_sampler(n_points=None):
+        coll_seed_state["value"] += 1
+        n = cfg["n_collocation"] if n_points is None else n_points
+        return generate_collocation_points(
+            n, XI_MAX, TAU_MAX, device,
+            seed=coll_seed_state["value"], method="sobol",
+        )
