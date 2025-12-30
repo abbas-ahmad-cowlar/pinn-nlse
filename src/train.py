@@ -318,3 +318,71 @@ def _resolve_training_profile(name: str) -> dict:
         "lbfgs_max_collocation": cfg["LBFGS_MAX_COLLOCATION"],
     }
 
+
+def _assert_training_artifacts(outputs: dict) -> dict:
+    """Fail loudly if a training wrapper returned before creating its artifacts."""
+    for key in ("model_path", "history_path", "metadata_path"):
+        path = outputs[key]
+        if not os.path.exists(path):
+            raise RuntimeError(f"Expected training artifact was not created: {path}")
+    return outputs
+
+
+def _smoke_preflight(seed: int, ic_func: str, s_value: int, N_sq: float,
+                     xi_max: float, tau_max: float, lr: float, device,
+                     lambdas: dict) -> None:
+    """1k collocation / 500 Adam steps / no L-BFGS — verify finite, decreasing loss."""
+    from src.pinn_nlse import PINN_NLSE
+    from src.data_gen import (
+        generate_collocation_points, generate_ic_points, generate_bc_points,
+    )
+
+    smoke_model = PINN_NLSE(n_hidden=3, n_neurons=64, s=s_value, N_sq=N_sq,
+                            xi_max=xi_max, tau_max=tau_max).to(device)
+    xi_sm, tau_sm = generate_collocation_points(1000, xi_max, tau_max, device,
+                                                seed=seed * 100 + 1)
+    xi_ic_sm, tau_ic_sm, a_ic_sm, b_ic_sm = generate_ic_points(
+        100, tau_max, ic_func, device
+    )
+    xi_bc_sm, tau_bc_sm, a_bc_sm, b_bc_sm = generate_bc_points(
+        50, xi_max, tau_max, device
+    )
+    smoke_data = {
+        "xi_coll": xi_sm, "tau_coll": tau_sm,
+        "xi_ic": xi_ic_sm, "tau_ic": tau_ic_sm, "a_ic": a_ic_sm, "b_ic": b_ic_sm,
+        "xi_bc": xi_bc_sm, "tau_bc": tau_bc_sm, "a_bc": a_bc_sm, "b_bc": b_bc_sm,
+    }
+    hist_smoke = train_adam(smoke_model, smoke_data, 500, lr, lambdas, log_every=50)
+    assert len(hist_smoke) >= 2, "Smoke run did not log enough loss values"
+    smoke_totals = np.array([h["total"] for h in hist_smoke], dtype=float)
+    if not np.all(np.isfinite(smoke_totals)):
+        raise RuntimeError("Smoke run logged non-finite losses")
+    window = max(2, len(smoke_totals) // 3)
+    initial_median = float(np.median(smoke_totals[:window]))
+    final_median = float(np.median(smoke_totals[-window:]))
+    if final_median >= initial_median:
+        raise RuntimeError(
+            f"Smoke loss did not improve: initial median={initial_median:.3e}, "
+            f"final median={final_median:.3e}"
+        )
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+
+
+def _evaluate_on_grid(model, gt, device):
+    """Predict (a, b) on the SSFM grid and return u_pinn (complex 2D array)."""
+    model.eval()
+    tau_np = gt["tau"]
+    xi_np = gt["xi"]
+    N_xi, N_tau = len(xi_np), len(tau_np)
+    xi_grid = torch.tensor(np.repeat(xi_np, N_tau), dtype=torch.float32).unsqueeze(1).to(device)
+    tau_grid = torch.tensor(np.tile(tau_np, N_xi), dtype=torch.float32).unsqueeze(1).to(device)
+    with torch.no_grad():
+        a_pred, b_pred = model(xi_grid, tau_grid)
+    a_np = a_pred.cpu().numpy().reshape(N_xi, N_tau)
+    b_np = b_pred.cpu().numpy().reshape(N_xi, N_tau)
+    return a_np + 1j * b_np
+
+
+# ---------------------------------------------------------------------------
+# Case wrapper: N=1 soliton
