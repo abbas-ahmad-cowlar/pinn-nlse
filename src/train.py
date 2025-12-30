@@ -236,3 +236,85 @@ def train_adam(model, data_dict, n_epochs, lr, lambdas, log_every=100,
 
     return history
 
+
+def train_lbfgs(model, data_dict, n_steps, lambdas, log_every=100,
+                checkpoint_every=50, checkpoint_dir="models/checkpoints",
+                case_name="model", history_size=25):
+    """Train with L-BFGS (stage 2: fine convergence). Bounded outer calls."""
+    optimizer = torch.optim.LBFGS(
+        model.parameters(), lr=1.0,
+        max_iter=1, max_eval=5,
+        tolerance_grad=1e-7, tolerance_change=1e-9,
+        history_size=history_size, line_search_fn="strong_wolfe",
+    )
+
+    history: list[dict] = []
+
+    for step in range(1, n_steps + 1):
+        def closure():
+            optimizer.zero_grad()
+            clear_input_grads(data_dict)
+            total_loss, loss_dict = compute_total_loss(
+                model, **data_dict, lambdas=lambdas
+            )
+            if not torch.isfinite(total_loss):
+                raise FloatingPointError(
+                    f"Non-finite L-BFGS loss at outer step {step}: {loss_dict}"
+                )
+            total_loss.backward()
+            return total_loss
+
+        optimizer.step(closure)
+        assert_finite_parameters(model, f"L-BFGS outer step {step}")
+
+        if step % log_every == 0 or step == 1:
+            # Re-evaluate AFTER the step (autograd, NOT no_grad — physics needs gradients)
+            total_loss, loss_dict = compute_total_loss(
+                model, **data_dict, lambdas=lambdas
+            )
+            del total_loss
+            history.append({"epoch": step, **loss_dict})
+            print(f"[LBFGS {step:>6d}/{n_steps}] "
+                  f"Total: {loss_dict['total']:.6f} | "
+                  f"Phys: {loss_dict['phys']:.6f} | "
+                  f"IC: {loss_dict['ic']:.6f}")
+
+        if checkpoint_every and step % checkpoint_every == 0:
+            clear_input_grads(data_dict)
+            total_loss, loss_dict = compute_total_loss(
+                model, **data_dict, lambdas=lambdas
+            )
+            del total_loss
+            save_checkpoint(
+                model, optimizer,
+                os.path.join(checkpoint_dir, f"{case_name}_lbfgs_{step:04d}.pt"),
+                step, loss_dict
+            )
+
+    return history
+
+
+# ---------------------------------------------------------------------------
+# Profile resolution and shared helpers for case wrappers
+# ---------------------------------------------------------------------------
+
+def _resolve_training_profile(name: str) -> dict:
+    """Convert a TRAINING_PROFILES entry from config.py to lowercase keys."""
+    from src.config import TRAINING_PROFILES
+    if name not in TRAINING_PROFILES:
+        raise ValueError(
+            f"Unknown training profile {name!r}; choose one of {sorted(TRAINING_PROFILES)}"
+        )
+    cfg = TRAINING_PROFILES[name]
+    return {
+        "n_collocation": cfg["N_COLLOCATION"],
+        "n_ic": cfg["N_IC_POINTS"],
+        "n_bc": cfg["N_BC_POINTS"],
+        "adam_epochs": cfg["N_EPOCHS_ADAM"],
+        "lbfgs_steps": cfg["N_STEPS_LBFGS"],
+        "log_every": cfg["LOG_EVERY"],
+        "lbfgs_history_size": cfg["LBFGS_HISTORY_SIZE"],
+        "resample_every": cfg["RESAMPLE_EVERY"],
+        "lbfgs_max_collocation": cfg["LBFGS_MAX_COLLOCATION"],
+    }
+
