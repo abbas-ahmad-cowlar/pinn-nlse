@@ -845,3 +845,81 @@ def run_gaussian_dispersion_training(profile: str = "baseline", seed: int = 42,
     )
     ax.legend(fontsize=12)
     ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    figure_path = (FIGURE_PATHS["training_loss_gaussian_dispersion"] if not run_tag
+                   else FIGURE_PATHS["training_loss_gaussian_dispersion"].replace(".png", f"__{run_tag}.png"))
+    _safe_save_figure(fig, figure_path, dpi=300)
+    plt.close(fig)
+
+    heldout_mse = None
+    if data_augmented and xi_data_val is not None:
+        with torch.no_grad():
+            a_val_p, b_val_p = model(xi_data_val, tau_data_val)
+            heldout_mse = float(torch.mean(
+                (a_val_p - a_data_val) ** 2 + (b_val_p - b_data_val) ** 2
+            ).item())
+        print(f"[gaussian] held-out supervised MSE: {heldout_mse:.4e}")
+
+    metadata_path = f"logs/{case_tag}_training_metadata.json"
+    _safe_write_json({
+        "case": "gaussian_dispersion_only",
+        "data_augmented": data_augmented,
+        "lambda_data": lambdas_gauss["data"],
+        "run_tag": run_tag,
+        "n_supervised_points": int(len(train_flat_idx)),
+        "n_supervised_train": int(len(train_flat_idx)),
+        "n_supervised_val": int(len(val_flat_idx)),
+        "supervised_train_seed": 27182 if data_augmented else None,
+        "supervised_val_seed": 314159 if data_augmented else None,
+        "heldout_supervised_mse": heldout_mse,
+        "training_profile": profile,
+        "seed": seed,
+        "adam_time_s": adam_time,
+        "lbfgs_time_s": lbfgs_time,
+        "total_time_s": total_time,
+        "full_domain_relative_l2": rel_l2_full,
+        "pulse_region_relative_l2": rel_l2_pulse,
+        "model_path": model_path,
+        "history_path": history_path,
+        "figure_path": figure_path,
+        "dataset_path": "data/dispersion_broadening_ground_truth.npz",
+    }, metadata_path)
+
+    outputs = {
+        "case": "gaussian_dispersion" + ("_data_augmented" if data_augmented else "")
+                + (f"__{run_tag}" if run_tag else ""),
+        "model_path": model_path,
+        "history_path": history_path,
+        "metadata_path": metadata_path,
+    }
+    return _assert_training_artifacts(outputs)
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Train PINN-NLSE cases")
+    parser.add_argument("--case", choices=["soliton", "gaussian_dispersion"],
+                        default="soliton")
+    parser.add_argument("--profile", choices=["smoke", "baseline", "full"],
+                        default="baseline")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--skip-lbfgs", action="store_true",
+                        help="Run Adam only and save an honestly labeled Adam-only result")
+    parser.add_argument("--lbfgs-collocation", type=int, default=None,
+                        help="Override max collocation points for L-BFGS refinement")
+    parser.add_argument("--data-augmented", action="store_true",
+                        help="Add SSFM supervision (lambda_data=1.0) for data-augmented recovery")
+    parser.add_argument("--run-tag", type=str, default=None,
+                        help="Optional run identifier appended to artifact filenames "
+                             "(e.g. --run-tag verify-2026-05-10). Without this flag the "
+                             "canonical published files are auto-archived with a UTC "
+                             "timestamp before being overwritten.")
+    args = parser.parse_args()
+
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
