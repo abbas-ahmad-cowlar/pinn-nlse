@@ -386,3 +386,366 @@ def _evaluate_on_grid(model, gt, device):
 
 # ---------------------------------------------------------------------------
 # Case wrapper: N=1 soliton
+# ---------------------------------------------------------------------------
+
+def run_soliton_training(profile: str = "baseline", seed: int = 42,
+                         skip_lbfgs: bool = False,
+                         lbfgs_max_collocation: Optional[int] = None,
+                         data_augmented: bool = False,
+                         n_data_train: int = 500,
+                         n_data_val: int = 1000,
+                         run_tag: Optional[str] = None) -> dict:
+    """Train the PINN on the N=1 soliton case.
+
+    Args:
+        data_augmented: If True, add SSFM supervision (lambda_data=1.0) with
+            n_data_train points; metadata + artifacts are saved under the
+            soliton_data_augmented_* names.
+        n_data_train: Number of SSFM supervision points (used when data_augmented).
+        n_data_val: Number of held-out SSFM points used for supervised
+            validation MSE (always disjoint from training labels).
+        run_tag: Optional run identifier appended to artifact filenames so
+            independent verification runs do not overwrite the
+            canonical published artifacts. Without ``run_tag``, existing
+            canonical files are auto-archived with a UTC timestamp before
+            being overwritten.
+
+    Returns a dict with keys: case, model_path, history_path, metadata_path.
+    Asserts the artifacts exist before returning.
+    """
+    import matplotlib
+    if "ipykernel" not in sys.modules:
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from src.pinn_nlse import PINN_NLSE
+    from src.data_gen import (
+        generate_collocation_points, generate_ic_points, generate_bc_points,
+        generate_data_points,
+        load_ground_truth_npz, assert_boundary_decay, assert_case_matches_model,
+    )
+    from src.config import (
+        XI_MAX, TAU_MAX, S_SIGN, N_SOLITON, LEARNING_RATE,
+        LAMBDA_PHYSICS, LAMBDA_IC, LAMBDA_BC, LAMBDA_DATA,
+        CHECKPOINT_EVERY, FIGURE_PATHS,
+    )
+    from src.utils import compute_relative_l2_error, compute_masked_relative_l2_error
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[soliton] device = {device}{' (data-augmented)' if data_augmented else ''}")
+
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(seed)
+
+    cfg = _resolve_training_profile(profile)
+    lbfgs_max = (cfg["lbfgs_max_collocation"]
+                 if lbfgs_max_collocation is None else lbfgs_max_collocation)
+
+    def make_lambdas(data_weight=None):
+        return {
+            "phys": LAMBDA_PHYSICS, "ic": LAMBDA_IC, "bc": LAMBDA_BC,
+            "data": LAMBDA_DATA if data_weight is None else data_weight,
+        }
+
+    smoke_lambdas = make_lambdas(data_weight=0.0)
+    print(f"[soliton] running smoke preflight (1000 coll, 500 Adam steps)...")
+    _smoke_preflight(seed, "sech", S_SIGN, float(N_SOLITON ** 2),
+                     XI_MAX, TAU_MAX, LEARNING_RATE, device, smoke_lambdas)
+
+    model = PINN_NLSE(n_hidden=5, n_neurons=128, s=S_SIGN,
+                      N_sq=float(N_SOLITON ** 2),
+                      xi_max=XI_MAX, tau_max=TAU_MAX).to(device)
+    print(f"[soliton] params = {model.count_parameters():,}")
+
+    gt = load_ground_truth_npz("data/soliton_ground_truth.npz")
+    assert_boundary_decay(gt)
+    assert_case_matches_model(gt, model, expected_ic_type="sech")
+
+    coll_seed_state = {"value": seed}
+
+    def collocation_sampler(n_points=None):
+        coll_seed_state["value"] += 1
+        n = cfg["n_collocation"] if n_points is None else n_points
+        return generate_collocation_points(
+            n, XI_MAX, TAU_MAX, device,
+            seed=coll_seed_state["value"], method="sobol",
+        )
+
+    xi_c, tau_c = collocation_sampler()
+    xi_val, tau_val = generate_collocation_points(2000, XI_MAX, TAU_MAX, device,
+                                                  seed=2024, method="sobol")
+    xi_ic, tau_ic, a_ic, b_ic = generate_ic_points(cfg["n_ic"], TAU_MAX, "sech", device)
+    xi_bc, tau_bc, a_bc, b_bc = generate_bc_points(cfg["n_bc"], XI_MAX, TAU_MAX, device)
+
+    data_dict = {
+        "xi_coll": xi_c, "tau_coll": tau_c,
+        "xi_ic": xi_ic, "tau_ic": tau_ic, "a_ic": a_ic, "b_ic": b_ic,
+        "xi_bc": xi_bc, "tau_bc": tau_bc, "a_bc": a_bc, "b_bc": b_bc,
+    }
+    residual_val_data = {"xi_coll": xi_val, "tau_coll": tau_val}
+
+    # Data augmentation hooks for SSFM-supervised recovery.
+    train_flat_idx = np.array([], dtype=np.int64)
+    val_flat_idx = np.array([], dtype=np.int64)
+    xi_data_val = tau_data_val = a_data_val = b_data_val = None
+    if data_augmented:
+        gt_aug = load_ground_truth_npz("data/soliton_ground_truth.npz")
+        assert_case_matches_model(gt_aug, model, expected_ic_type="sech")
+        xi_data, tau_data, a_data, b_data, train_flat_idx = generate_data_points(
+            gt_aug["u_hist"], gt_aug["xi"], gt_aug["tau"],
+            N_data=n_data_train, device=device, seed=31415, return_indices=True,
+        )
+        xi_data_val, tau_data_val, a_data_val, b_data_val, val_flat_idx = generate_data_points(
+            gt_aug["u_hist"], gt_aug["xi"], gt_aug["tau"],
+            N_data=n_data_val, device=device, seed=92653,
+            exclude_flat_indices=set(train_flat_idx.tolist()),
+            return_indices=True,
+        )
+        data_dict.update({
+            "xi_data": xi_data, "tau_data": tau_data,
+            "a_data": a_data, "b_data": b_data,
+        })
+        lambdas_soliton = make_lambdas(data_weight=1.0)
+        print(f"[soliton] data augmentation: {n_data_train} train + {n_data_val} held-out validation")
+    else:
+        lambdas_soliton = make_lambdas()
+
+    base_case_tag = "soliton_data_augmented" if data_augmented else "soliton"
+    case_tag = f"{base_case_tag}__{run_tag}" if run_tag else base_case_tag
+
+    # Stage 1: Adam
+    t0 = time.time()
+    hist_adam = train_adam(
+        model, data_dict, cfg["adam_epochs"], LEARNING_RATE, lambdas_soliton,
+        cfg["log_every"], checkpoint_every=CHECKPOINT_EVERY,
+        checkpoint_dir="models/checkpoints", case_name=case_tag,
+        collocation_sampler=collocation_sampler,
+        resample_every=cfg["resample_every"],
+        residual_val_data=residual_val_data,
+    )
+    _safe_torch_save(model.state_dict(), f"models/{case_tag}_after_adam.pt")
+    adam_time = time.time() - t0
+    print(f"[soliton] Adam phase: {adam_time:.1f}s")
+
+    # Stage 2: L-BFGS (optional)
+    t1 = time.time()
+    hist_lbfgs: list[dict] = []
+    if cfg["lbfgs_steps"] > 0 and not skip_lbfgs:
+        lbfgs_data = make_lbfgs_data(
+            data_dict, collocation_sampler, max_collocation=lbfgs_max
+        )
+        hist_lbfgs = train_lbfgs(
+            model, lbfgs_data, cfg["lbfgs_steps"], lambdas_soliton, cfg["log_every"],
+            checkpoint_every=50, checkpoint_dir="models/checkpoints",
+            case_name=case_tag, history_size=cfg["lbfgs_history_size"],
+        )
+
+    if skip_lbfgs:
+        model_path = f"models/{case_tag}_adam_only_final.pt"
+    else:
+        model_path = f"models/{case_tag}_final.pt"
+    _safe_torch_save(model.state_dict(), model_path)
+    lbfgs_time = time.time() - t1
+    total_time = time.time() - t0
+    print(f"[soliton] L-BFGS phase: {lbfgs_time:.1f}s | total: {total_time:.1f}s")
+
+    # Save history
+    history_path = f"logs/{case_tag}_training_history.json"
+    _safe_write_json({
+        "adam": hist_adam, "lbfgs": hist_lbfgs,
+        "case": "soliton_N1" + ("_data_augmented" if data_augmented else ""),
+        "training_profile": profile,
+        "lambdas": lambdas_soliton,
+        "run_tag": run_tag,
+        "n_collocation": cfg["n_collocation"], "n_ic": cfg["n_ic"], "n_bc": cfg["n_bc"],
+        "n_supervised_train": int(len(train_flat_idx)),
+        "n_supervised_val": int(len(val_flat_idx)),
+        "adam_time_s": adam_time, "lbfgs_time_s": lbfgs_time,
+        "total_time_s": total_time,
+    }, history_path)
+
+    # Post-training metrics
+    u_pinn = _evaluate_on_grid(model, gt, device)
+    rel_l2_full = float(compute_relative_l2_error(u_pinn, gt["u_hist"]))
+    pulse_mask = np.broadcast_to((np.abs(gt["tau"]) <= 10)[None, :], gt["u_hist"].shape)
+    rel_l2_pulse = float(compute_masked_relative_l2_error(u_pinn, gt["u_hist"], pulse_mask))
+    print(f"[soliton] full-domain rel L2 = {rel_l2_full:.4f} ({100*rel_l2_full:.2f}%)")
+    print(f"[soliton] pulse-region rel L2 = {rel_l2_pulse:.4f} ({100*rel_l2_pulse:.2f}%)")
+
+    # Loss curve figure
+    epochs_a = [h["epoch"] for h in hist_adam]
+    losses_a = [h["total"] for h in hist_adam]
+    epochs_l = [h["epoch"] + cfg["adam_epochs"] for h in hist_lbfgs]
+    losses_l = [h["total"] for h in hist_lbfgs]
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.semilogy(epochs_a, losses_a, "b-", lw=1.5, label="Adam")
+    if losses_l:
+        ax.semilogy(epochs_l, losses_l, "r-", lw=1.5, label="L-BFGS")
+    ax.set_xlabel("Epoch", fontsize=14)
+    ax.set_ylabel("Total loss", fontsize=14)
+    title_suffix = []
+    if data_augmented:
+        title_suffix.append("data-augmented")
+    if run_tag:
+        title_suffix.append(f"tag={run_tag}")
+    ax.set_title(
+        "PINN training loss - N=1 soliton"
+        + (f" ({', '.join(title_suffix)})" if title_suffix else ""),
+        fontsize=15,
+    )
+    ax.legend(fontsize=12)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    figure_path = (FIGURE_PATHS["training_loss_soliton"] if not run_tag
+                   else FIGURE_PATHS["training_loss_soliton"].replace(".png", f"__{run_tag}.png"))
+    _safe_save_figure(fig, figure_path, dpi=300)
+    plt.close(fig)
+
+    # Held-out supervised MSE on disjoint validation labels (data-augmented only)
+    heldout_mse = None
+    if data_augmented and xi_data_val is not None:
+        with torch.no_grad():
+            a_val_p, b_val_p = model(xi_data_val, tau_data_val)
+            heldout_mse = float(torch.mean(
+                (a_val_p - a_data_val) ** 2 + (b_val_p - b_data_val) ** 2
+            ).item())
+        print(f"[soliton] held-out supervised MSE: {heldout_mse:.4e}")
+
+    metadata_path = f"logs/{case_tag}_training_metadata.json"
+    _safe_write_json({
+        "case": "soliton_N1",
+        "data_augmented": data_augmented,
+        "lambda_data": lambdas_soliton["data"],
+        "run_tag": run_tag,
+        "n_supervised_points": int(len(train_flat_idx)),
+        "n_supervised_train": int(len(train_flat_idx)),
+        "n_supervised_val": int(len(val_flat_idx)),
+        "supervised_train_seed": 31415 if data_augmented else None,
+        "supervised_val_seed": 92653 if data_augmented else None,
+        "heldout_supervised_mse": heldout_mse,
+        "training_profile": profile,
+        "seed": seed,
+        "adam_time_s": adam_time,
+        "lbfgs_time_s": lbfgs_time,
+        "total_time_s": total_time,
+        "full_domain_relative_l2": rel_l2_full,
+        "pulse_region_relative_l2": rel_l2_pulse,
+        "model_path": model_path,
+        "history_path": history_path,
+        "figure_path": figure_path,
+        "dataset_path": "data/soliton_ground_truth.npz",
+    }, metadata_path)
+
+    outputs = {
+        "case": "soliton" + ("_data_augmented" if data_augmented else "")
+                + (f"__{run_tag}" if run_tag else ""),
+        "model_path": model_path,
+        "history_path": history_path,
+        "metadata_path": metadata_path,
+    }
+    return _assert_training_artifacts(outputs)
+
+
+# ---------------------------------------------------------------------------
+# Case wrapper: Gaussian dispersion-only
+# ---------------------------------------------------------------------------
+
+def run_gaussian_dispersion_training(profile: str = "baseline", seed: int = 42,
+                                     skip_lbfgs: bool = False,
+                                     lbfgs_max_collocation: Optional[int] = None,
+                                     data_augmented: bool = False,
+                                     n_data_train: int = 500,
+                                     n_data_val: int = 1000,
+                                     run_tag: Optional[str] = None) -> dict:
+    """Train the PINN on the Gaussian dispersion-only case.
+
+    `data_augmented=True` labels all artifacts as
+    ``gaussian_dispersion_data_augmented_*`` and adds SSFM supervision.
+    `run_tag` appends a suffix to all artifact paths so independent verification
+    runs do not overwrite the canonical published artifacts.
+    """
+    import matplotlib
+    if "ipykernel" not in sys.modules:
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from src.pinn_nlse import PINN_NLSE
+    from src.data_gen import (
+        generate_collocation_points, generate_ic_points, generate_bc_points,
+        generate_data_points,
+        load_ground_truth_npz, assert_boundary_decay, assert_case_matches_model,
+    )
+    from src.config import (
+        XI_MAX, TAU_MAX, LEARNING_RATE,
+        LAMBDA_PHYSICS, LAMBDA_IC, LAMBDA_BC, LAMBDA_DATA,
+        CHECKPOINT_EVERY, FIGURE_PATHS,
+    )
+    from src.utils import compute_relative_l2_error, compute_masked_relative_l2_error
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[gaussian] device = {device}{' (data-augmented)' if data_augmented else ''}")
+
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(seed)
+
+    cfg = _resolve_training_profile(profile)
+    lbfgs_max = (cfg["lbfgs_max_collocation"]
+                 if lbfgs_max_collocation is None else lbfgs_max_collocation)
+
+    def make_lambdas(data_weight=None):
+        return {
+            "phys": LAMBDA_PHYSICS, "ic": LAMBDA_IC, "bc": LAMBDA_BC,
+            "data": LAMBDA_DATA if data_weight is None else data_weight,
+        }
+
+    smoke_lambdas = make_lambdas(data_weight=0.0)
+    print(f"[gaussian] running smoke preflight (1000 coll, 500 Adam steps)...")
+    _smoke_preflight(seed, "gaussian", -1, 0.0,
+                     XI_MAX, TAU_MAX, LEARNING_RATE, device, smoke_lambdas)
+
+    model = PINN_NLSE(n_hidden=5, n_neurons=128, s=-1, N_sq=0.0,
+                      xi_max=XI_MAX, tau_max=TAU_MAX).to(device)
+    print(f"[gaussian] params = {model.count_parameters():,}")
+
+    gt = load_ground_truth_npz("data/dispersion_broadening_ground_truth.npz")
+    assert_boundary_decay(gt)
+    assert_case_matches_model(gt, model, expected_ic_type="gaussian")
+
+    coll_seed_state = {"value": seed + 2718}
+
+    def collocation_sampler(n_points=None):
+        coll_seed_state["value"] += 1
+        n = cfg["n_collocation"] if n_points is None else n_points
+        return generate_collocation_points(
+            n, XI_MAX, TAU_MAX, device,
+            seed=coll_seed_state["value"], method="sobol",
+        )
+
+    xi_c, tau_c = collocation_sampler()
+    xi_val, tau_val = generate_collocation_points(2000, XI_MAX, TAU_MAX, device,
+                                                  seed=2025, method="sobol")
+    xi_ic, tau_ic, a_ic, b_ic = generate_ic_points(cfg["n_ic"], TAU_MAX, "gaussian", device)
+    xi_bc, tau_bc, a_bc, b_bc = generate_bc_points(cfg["n_bc"], XI_MAX, TAU_MAX, device)
+
+    data_dict = {
+        "xi_coll": xi_c, "tau_coll": tau_c,
+        "xi_ic": xi_ic, "tau_ic": tau_ic, "a_ic": a_ic, "b_ic": b_ic,
+        "xi_bc": xi_bc, "tau_bc": tau_bc, "a_bc": a_bc, "b_bc": b_bc,
+    }
+    residual_val_data = {"xi_coll": xi_val, "tau_coll": tau_val}
+
+    # Data augmentation hooks for SSFM-supervised recovery.
+    train_flat_idx = np.array([], dtype=np.int64)
+    val_flat_idx = np.array([], dtype=np.int64)
+    xi_data_val = tau_data_val = a_data_val = b_data_val = None
+    if data_augmented:
+        gt_aug = load_ground_truth_npz("data/dispersion_broadening_ground_truth.npz")
+        assert_case_matches_model(gt_aug, model, expected_ic_type="gaussian")
+        xi_data, tau_data, a_data, b_data, train_flat_idx = generate_data_points(
+            gt_aug["u_hist"], gt_aug["xi"], gt_aug["tau"],
+            N_data=n_data_train, device=device, seed=27182, return_indices=True,
