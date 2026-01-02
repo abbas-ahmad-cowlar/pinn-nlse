@@ -579,3 +579,76 @@ def run_soliton_training(profile: str = "baseline", seed: int = 42,
     losses_a = [h["total"] for h in hist_adam]
     epochs_l = [h["epoch"] + cfg["adam_epochs"] for h in hist_lbfgs]
     losses_l = [h["total"] for h in hist_lbfgs]
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.semilogy(epochs_a, losses_a, "b-", lw=1.5, label="Adam")
+    if losses_l:
+        ax.semilogy(epochs_l, losses_l, "r-", lw=1.5, label="L-BFGS")
+    ax.set_xlabel("Epoch", fontsize=14)
+    ax.set_ylabel("Total loss", fontsize=14)
+    title_suffix = []
+    if data_augmented:
+        title_suffix.append("data-augmented")
+    if run_tag:
+        title_suffix.append(f"tag={run_tag}")
+    ax.set_title(
+        "PINN training loss - N=1 soliton"
+        + (f" ({', '.join(title_suffix)})" if title_suffix else ""),
+        fontsize=15,
+    )
+    ax.legend(fontsize=12)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    figure_path = (FIGURE_PATHS["training_loss_soliton"] if not run_tag
+                   else FIGURE_PATHS["training_loss_soliton"].replace(".png", f"__{run_tag}.png"))
+    _safe_save_figure(fig, figure_path, dpi=300)
+    plt.close(fig)
+
+    # Held-out supervised MSE on disjoint validation labels (data-augmented only)
+    heldout_mse = None
+    if data_augmented and xi_data_val is not None:
+        with torch.no_grad():
+            a_val_p, b_val_p = model(xi_data_val, tau_data_val)
+            heldout_mse = float(torch.mean(
+                (a_val_p - a_data_val) ** 2 + (b_val_p - b_data_val) ** 2
+            ).item())
+        print(f"[soliton] held-out supervised MSE: {heldout_mse:.4e}")
+
+    metadata_path = f"logs/{case_tag}_training_metadata.json"
+    _safe_write_json({
+        "case": "soliton_N1",
+        "data_augmented": data_augmented,
+        "lambda_data": lambdas_soliton["data"],
+        "run_tag": run_tag,
+        "n_supervised_points": int(len(train_flat_idx)),
+        "n_supervised_train": int(len(train_flat_idx)),
+        "n_supervised_val": int(len(val_flat_idx)),
+        "supervised_train_seed": 31415 if data_augmented else None,
+        "supervised_val_seed": 92653 if data_augmented else None,
+        "heldout_supervised_mse": heldout_mse,
+        "training_profile": profile,
+        "seed": seed,
+        "adam_time_s": adam_time,
+        "lbfgs_time_s": lbfgs_time,
+        "total_time_s": total_time,
+        "full_domain_relative_l2": rel_l2_full,
+        "pulse_region_relative_l2": rel_l2_pulse,
+        "model_path": model_path,
+        "history_path": history_path,
+        "figure_path": figure_path,
+        "dataset_path": "data/soliton_ground_truth.npz",
+    }, metadata_path)
+
+    outputs = {
+        "case": "soliton" + ("_data_augmented" if data_augmented else "")
+                + (f"__{run_tag}" if run_tag else ""),
+        "model_path": model_path,
+        "history_path": history_path,
+        "metadata_path": metadata_path,
+    }
+    return _assert_training_artifacts(outputs)
+
+
+# ---------------------------------------------------------------------------
+# Case wrapper: Gaussian dispersion-only
+# ---------------------------------------------------------------------------
