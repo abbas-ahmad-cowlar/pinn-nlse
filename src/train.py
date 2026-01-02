@@ -652,3 +652,100 @@ def run_soliton_training(profile: str = "baseline", seed: int = 42,
 # ---------------------------------------------------------------------------
 # Case wrapper: Gaussian dispersion-only
 # ---------------------------------------------------------------------------
+
+def run_gaussian_dispersion_training(profile: str = "baseline", seed: int = 42,
+                                     skip_lbfgs: bool = False,
+                                     lbfgs_max_collocation: Optional[int] = None,
+                                     data_augmented: bool = False,
+                                     n_data_train: int = 500,
+                                     n_data_val: int = 1000,
+                                     run_tag: Optional[str] = None) -> dict:
+    """Train the PINN on the Gaussian dispersion-only case.
+
+    `data_augmented=True` labels all artifacts as
+    ``gaussian_dispersion_data_augmented_*`` and adds SSFM supervision.
+    `run_tag` appends a suffix to all artifact paths so independent verification
+    runs do not overwrite the canonical published artifacts.
+    """
+    import matplotlib
+    if "ipykernel" not in sys.modules:
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from src.pinn_nlse import PINN_NLSE
+    from src.data_gen import (
+        generate_collocation_points, generate_ic_points, generate_bc_points,
+        generate_data_points,
+        load_ground_truth_npz, assert_boundary_decay, assert_case_matches_model,
+    )
+    from src.config import (
+        XI_MAX, TAU_MAX, LEARNING_RATE,
+        LAMBDA_PHYSICS, LAMBDA_IC, LAMBDA_BC, LAMBDA_DATA,
+        CHECKPOINT_EVERY, FIGURE_PATHS,
+    )
+    from src.utils import compute_relative_l2_error, compute_masked_relative_l2_error
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[gaussian] device = {device}{' (data-augmented)' if data_augmented else ''}")
+
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(seed)
+
+    cfg = _resolve_training_profile(profile)
+    lbfgs_max = (cfg["lbfgs_max_collocation"]
+                 if lbfgs_max_collocation is None else lbfgs_max_collocation)
+
+    def make_lambdas(data_weight=None):
+        return {
+            "phys": LAMBDA_PHYSICS, "ic": LAMBDA_IC, "bc": LAMBDA_BC,
+            "data": LAMBDA_DATA if data_weight is None else data_weight,
+        }
+
+    smoke_lambdas = make_lambdas(data_weight=0.0)
+    print(f"[gaussian] running smoke preflight (1000 coll, 500 Adam steps)...")
+    _smoke_preflight(seed, "gaussian", -1, 0.0,
+                     XI_MAX, TAU_MAX, LEARNING_RATE, device, smoke_lambdas)
+
+    model = PINN_NLSE(n_hidden=5, n_neurons=128, s=-1, N_sq=0.0,
+                      xi_max=XI_MAX, tau_max=TAU_MAX).to(device)
+    print(f"[gaussian] params = {model.count_parameters():,}")
+
+    gt = load_ground_truth_npz("data/dispersion_broadening_ground_truth.npz")
+    assert_boundary_decay(gt)
+    assert_case_matches_model(gt, model, expected_ic_type="gaussian")
+
+    coll_seed_state = {"value": seed + 2718}
+
+    def collocation_sampler(n_points=None):
+        coll_seed_state["value"] += 1
+        n = cfg["n_collocation"] if n_points is None else n_points
+        return generate_collocation_points(
+            n, XI_MAX, TAU_MAX, device,
+            seed=coll_seed_state["value"], method="sobol",
+        )
+
+    xi_c, tau_c = collocation_sampler()
+    xi_val, tau_val = generate_collocation_points(2000, XI_MAX, TAU_MAX, device,
+                                                  seed=2025, method="sobol")
+    xi_ic, tau_ic, a_ic, b_ic = generate_ic_points(cfg["n_ic"], TAU_MAX, "gaussian", device)
+    xi_bc, tau_bc, a_bc, b_bc = generate_bc_points(cfg["n_bc"], XI_MAX, TAU_MAX, device)
+
+    data_dict = {
+        "xi_coll": xi_c, "tau_coll": tau_c,
+        "xi_ic": xi_ic, "tau_ic": tau_ic, "a_ic": a_ic, "b_ic": b_ic,
+        "xi_bc": xi_bc, "tau_bc": tau_bc, "a_bc": a_bc, "b_bc": b_bc,
+    }
+    residual_val_data = {"xi_coll": xi_val, "tau_coll": tau_val}
+
+    # Data augmentation hooks for SSFM-supervised recovery.
+    train_flat_idx = np.array([], dtype=np.int64)
+    val_flat_idx = np.array([], dtype=np.int64)
+    xi_data_val = tau_data_val = a_data_val = b_data_val = None
+    if data_augmented:
+        gt_aug = load_ground_truth_npz("data/dispersion_broadening_ground_truth.npz")
+        assert_case_matches_model(gt_aug, model, expected_ic_type="gaussian")
+        xi_data, tau_data, a_data, b_data, train_flat_idx = generate_data_points(
+            gt_aug["u_hist"], gt_aug["xi"], gt_aug["tau"],
+            N_data=n_data_train, device=device, seed=27182, return_indices=True,
