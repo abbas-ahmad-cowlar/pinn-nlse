@@ -472,3 +472,110 @@ def run_soliton_training(profile: str = "baseline", seed: int = 42,
             n, XI_MAX, TAU_MAX, device,
             seed=coll_seed_state["value"], method="sobol",
         )
+
+    xi_c, tau_c = collocation_sampler()
+    xi_val, tau_val = generate_collocation_points(2000, XI_MAX, TAU_MAX, device,
+                                                  seed=2024, method="sobol")
+    xi_ic, tau_ic, a_ic, b_ic = generate_ic_points(cfg["n_ic"], TAU_MAX, "sech", device)
+    xi_bc, tau_bc, a_bc, b_bc = generate_bc_points(cfg["n_bc"], XI_MAX, TAU_MAX, device)
+
+    data_dict = {
+        "xi_coll": xi_c, "tau_coll": tau_c,
+        "xi_ic": xi_ic, "tau_ic": tau_ic, "a_ic": a_ic, "b_ic": b_ic,
+        "xi_bc": xi_bc, "tau_bc": tau_bc, "a_bc": a_bc, "b_bc": b_bc,
+    }
+    residual_val_data = {"xi_coll": xi_val, "tau_coll": tau_val}
+
+    # Data augmentation hooks for SSFM-supervised recovery.
+    train_flat_idx = np.array([], dtype=np.int64)
+    val_flat_idx = np.array([], dtype=np.int64)
+    xi_data_val = tau_data_val = a_data_val = b_data_val = None
+    if data_augmented:
+        gt_aug = load_ground_truth_npz("data/soliton_ground_truth.npz")
+        assert_case_matches_model(gt_aug, model, expected_ic_type="sech")
+        xi_data, tau_data, a_data, b_data, train_flat_idx = generate_data_points(
+            gt_aug["u_hist"], gt_aug["xi"], gt_aug["tau"],
+            N_data=n_data_train, device=device, seed=31415, return_indices=True,
+        )
+        xi_data_val, tau_data_val, a_data_val, b_data_val, val_flat_idx = generate_data_points(
+            gt_aug["u_hist"], gt_aug["xi"], gt_aug["tau"],
+            N_data=n_data_val, device=device, seed=92653,
+            exclude_flat_indices=set(train_flat_idx.tolist()),
+            return_indices=True,
+        )
+        data_dict.update({
+            "xi_data": xi_data, "tau_data": tau_data,
+            "a_data": a_data, "b_data": b_data,
+        })
+        lambdas_soliton = make_lambdas(data_weight=1.0)
+        print(f"[soliton] data augmentation: {n_data_train} train + {n_data_val} held-out validation")
+    else:
+        lambdas_soliton = make_lambdas()
+
+    base_case_tag = "soliton_data_augmented" if data_augmented else "soliton"
+    case_tag = f"{base_case_tag}__{run_tag}" if run_tag else base_case_tag
+
+    # Stage 1: Adam
+    t0 = time.time()
+    hist_adam = train_adam(
+        model, data_dict, cfg["adam_epochs"], LEARNING_RATE, lambdas_soliton,
+        cfg["log_every"], checkpoint_every=CHECKPOINT_EVERY,
+        checkpoint_dir="models/checkpoints", case_name=case_tag,
+        collocation_sampler=collocation_sampler,
+        resample_every=cfg["resample_every"],
+        residual_val_data=residual_val_data,
+    )
+    _safe_torch_save(model.state_dict(), f"models/{case_tag}_after_adam.pt")
+    adam_time = time.time() - t0
+    print(f"[soliton] Adam phase: {adam_time:.1f}s")
+
+    # Stage 2: L-BFGS (optional)
+    t1 = time.time()
+    hist_lbfgs: list[dict] = []
+    if cfg["lbfgs_steps"] > 0 and not skip_lbfgs:
+        lbfgs_data = make_lbfgs_data(
+            data_dict, collocation_sampler, max_collocation=lbfgs_max
+        )
+        hist_lbfgs = train_lbfgs(
+            model, lbfgs_data, cfg["lbfgs_steps"], lambdas_soliton, cfg["log_every"],
+            checkpoint_every=50, checkpoint_dir="models/checkpoints",
+            case_name=case_tag, history_size=cfg["lbfgs_history_size"],
+        )
+
+    if skip_lbfgs:
+        model_path = f"models/{case_tag}_adam_only_final.pt"
+    else:
+        model_path = f"models/{case_tag}_final.pt"
+    _safe_torch_save(model.state_dict(), model_path)
+    lbfgs_time = time.time() - t1
+    total_time = time.time() - t0
+    print(f"[soliton] L-BFGS phase: {lbfgs_time:.1f}s | total: {total_time:.1f}s")
+
+    # Save history
+    history_path = f"logs/{case_tag}_training_history.json"
+    _safe_write_json({
+        "adam": hist_adam, "lbfgs": hist_lbfgs,
+        "case": "soliton_N1" + ("_data_augmented" if data_augmented else ""),
+        "training_profile": profile,
+        "lambdas": lambdas_soliton,
+        "run_tag": run_tag,
+        "n_collocation": cfg["n_collocation"], "n_ic": cfg["n_ic"], "n_bc": cfg["n_bc"],
+        "n_supervised_train": int(len(train_flat_idx)),
+        "n_supervised_val": int(len(val_flat_idx)),
+        "adam_time_s": adam_time, "lbfgs_time_s": lbfgs_time,
+        "total_time_s": total_time,
+    }, history_path)
+
+    # Post-training metrics
+    u_pinn = _evaluate_on_grid(model, gt, device)
+    rel_l2_full = float(compute_relative_l2_error(u_pinn, gt["u_hist"]))
+    pulse_mask = np.broadcast_to((np.abs(gt["tau"]) <= 10)[None, :], gt["u_hist"].shape)
+    rel_l2_pulse = float(compute_masked_relative_l2_error(u_pinn, gt["u_hist"], pulse_mask))
+    print(f"[soliton] full-domain rel L2 = {rel_l2_full:.4f} ({100*rel_l2_full:.2f}%)")
+    print(f"[soliton] pulse-region rel L2 = {rel_l2_pulse:.4f} ({100*rel_l2_pulse:.2f}%)")
+
+    # Loss curve figure
+    epochs_a = [h["epoch"] for h in hist_adam]
+    losses_a = [h["total"] for h in hist_adam]
+    epochs_l = [h["epoch"] + cfg["adam_epochs"] for h in hist_lbfgs]
+    losses_l = [h["total"] for h in hist_lbfgs]
