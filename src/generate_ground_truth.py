@@ -47,3 +47,55 @@ from src.nlse_utils import compute_energy, create_grid, gaussian_pulse, sech_pul
 from src.ssfm import ssfm_propagate
 from src.utils import plot_propagation_map, plot_spectrum_evolution
 
+
+# ---------------------------------------------------------------------------
+# Provenance helpers
+# ---------------------------------------------------------------------------
+
+def git_commit_or_unknown(path: str) -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "-C", path, "rev-parse", "--short", "HEAD"],
+            text=True, stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return "unknown"
+
+
+def ground_truth_metadata(u_hist, xi_arr, tau, omega, tau_max, dtau):
+    if len(tau) > 1 and not np.isclose(float(tau[1] - tau[0]), float(dtau)):
+        raise ValueError("dtau does not match the stored tau grid spacing")
+    max_boundary_intensity = float(np.max(np.abs(u_hist[:, [0, -1]]) ** 2))
+    return {
+        "omega": omega,
+        "dxi": float(xi_arr[1] - xi_arr[0]),
+        "N_T": int(len(tau)),
+        "N_Z": int(len(xi_arr) - 1),
+        "tau_max": float(tau_max),
+        "xi_max": float(xi_arr[-1]),
+        "u_dtype": str(u_hist.dtype),
+        "tau_dtype": str(tau.dtype),
+        "max_boundary_intensity": max_boundary_intensity,
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "pinn_repo_commit": git_commit_or_unknown("."),
+        "ssfm_source_commit": git_commit_or_unknown("../2-Split_Step_Fourier_Solver"),
+        "ssfm_source_path": "../2-Split_Step_Fourier_Solver/src/nlse_ssfm",
+    }
+
+
+def assert_boundary_leakage_ok(u_hist, tolerance: float = 1e-6,
+                               edge_points: int = 2, label: str = "dataset") -> float:
+    edge_intensity = np.abs(np.concatenate(
+        [u_hist[:, :edge_points], u_hist[:, -edge_points:]], axis=1
+    )) ** 2
+    max_edge = float(np.max(edge_intensity))
+    if max_edge >= tolerance:
+        raise AssertionError(
+            f"{label}: boundary intensity {max_edge:.2e} exceeds {tolerance:.1e}; "
+            "increase TAU_MAX or do not use zero temporal BCs for this case"
+        )
+    return max_edge
+
+
+# ---------------------------------------------------------------------------
+# Per-dataset generators
