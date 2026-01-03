@@ -923,3 +923,28 @@ def main():
 
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
+
+    if args.case == "soliton":
+        out = run_soliton_training(
+            profile=args.profile, seed=args.seed,
+            skip_lbfgs=args.skip_lbfgs,
+            lbfgs_max_collocation=args.lbfgs_collocation,
+            data_augmented=args.data_augmented,
+            run_tag=args.run_tag,
+        )
+    elif args.case == "gaussian_dispersion":
+        out = run_gaussian_dispersion_training(
+            profile=args.profile, seed=args.seed,
+            skip_lbfgs=args.skip_lbfgs,
+            lbfgs_max_collocation=args.lbfgs_collocation,
+            data_augmented=args.data_augmented,
+            run_tag=args.run_tag,
+        )
+
+    print("\nArtifacts:")
+    for k, v in out.items():
+        print(f"  {k}: {v}")
+
+
+if __name__ == "__main__":
+    main()
