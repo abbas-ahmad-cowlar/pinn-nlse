@@ -749,3 +749,202 @@ def run_gaussian_dispersion_training(profile: str = "baseline", seed: int = 42,
         xi_data, tau_data, a_data, b_data, train_flat_idx = generate_data_points(
             gt_aug["u_hist"], gt_aug["xi"], gt_aug["tau"],
             N_data=n_data_train, device=device, seed=27182, return_indices=True,
+        )
+        xi_data_val, tau_data_val, a_data_val, b_data_val, val_flat_idx = generate_data_points(
+            gt_aug["u_hist"], gt_aug["xi"], gt_aug["tau"],
+            N_data=n_data_val, device=device, seed=314159,
+            exclude_flat_indices=set(train_flat_idx.tolist()),
+            return_indices=True,
+        )
+        data_dict.update({
+            "xi_data": xi_data, "tau_data": tau_data,
+            "a_data": a_data, "b_data": b_data,
+        })
+        lambdas_gauss = make_lambdas(data_weight=1.0)
+        print(f"[gaussian] data augmentation: {n_data_train} train + {n_data_val} held-out validation")
+    else:
+        lambdas_gauss = make_lambdas(data_weight=0.0)
+
+    base_case_tag = "gaussian_dispersion_data_augmented" if data_augmented else "gaussian_dispersion"
+    case_tag = f"{base_case_tag}__{run_tag}" if run_tag else base_case_tag
+
+    t0 = time.time()
+    hist_adam = train_adam(
+        model, data_dict, cfg["adam_epochs"], LEARNING_RATE, lambdas_gauss,
+        cfg["log_every"], checkpoint_every=CHECKPOINT_EVERY,
+        checkpoint_dir="models/checkpoints", case_name=case_tag,
+        collocation_sampler=collocation_sampler,
+        resample_every=cfg["resample_every"],
+        residual_val_data=residual_val_data,
+    )
+    _safe_torch_save(model.state_dict(), f"models/{case_tag}_after_adam.pt")
+    adam_time = time.time() - t0
+    print(f"[gaussian] Adam phase: {adam_time:.1f}s")
+
+    t1 = time.time()
+    hist_lbfgs: list[dict] = []
+    if cfg["lbfgs_steps"] > 0 and not skip_lbfgs:
+        lbfgs_data = make_lbfgs_data(
+            data_dict, collocation_sampler, max_collocation=lbfgs_max
+        )
+        hist_lbfgs = train_lbfgs(
+            model, lbfgs_data, cfg["lbfgs_steps"], lambdas_gauss, cfg["log_every"],
+            checkpoint_every=50, checkpoint_dir="models/checkpoints",
+            case_name=case_tag, history_size=cfg["lbfgs_history_size"],
+        )
+
+    if skip_lbfgs:
+        model_path = f"models/{case_tag}_adam_only_final.pt"
+    else:
+        model_path = f"models/{case_tag}_final.pt"
+    _safe_torch_save(model.state_dict(), model_path)
+    lbfgs_time = time.time() - t1
+    total_time = time.time() - t0
+    print(f"[gaussian] L-BFGS phase: {lbfgs_time:.1f}s | total: {total_time:.1f}s")
+
+    history_path = f"logs/{case_tag}_training_history.json"
+    _safe_write_json({
+        "adam": hist_adam, "lbfgs": hist_lbfgs,
+        "case": "gaussian_dispersion_only" + ("_data_augmented" if data_augmented else ""),
+        "training_profile": profile,
+        "run_tag": run_tag,
+        "s": -1, "N_sq": 0.0, "lambdas": lambdas_gauss,
+        "n_supervised_train": int(len(train_flat_idx)),
+        "n_supervised_val": int(len(val_flat_idx)),
+        "adam_time_s": adam_time, "lbfgs_time_s": lbfgs_time,
+        "total_time_s": total_time,
+    }, history_path)
+
+    u_pinn = _evaluate_on_grid(model, gt, device)
+    rel_l2_full = float(compute_relative_l2_error(u_pinn, gt["u_hist"]))
+    pulse_mask = np.broadcast_to((np.abs(gt["tau"]) <= 10)[None, :], gt["u_hist"].shape)
+    rel_l2_pulse = float(compute_masked_relative_l2_error(u_pinn, gt["u_hist"], pulse_mask))
+    print(f"[gaussian] full-domain rel L2 = {rel_l2_full:.4f} ({100*rel_l2_full:.2f}%)")
+    print(f"[gaussian] pulse-region rel L2 = {rel_l2_pulse:.4f} ({100*rel_l2_pulse:.2f}%)")
+
+    epochs_a = [h["epoch"] for h in hist_adam]
+    losses_a = [h["total"] for h in hist_adam]
+    epochs_l = [h["epoch"] + cfg["adam_epochs"] for h in hist_lbfgs]
+    losses_l = [h["total"] for h in hist_lbfgs]
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.semilogy(epochs_a, losses_a, "b-", lw=1.5, label="Adam")
+    if losses_l:
+        ax.semilogy(epochs_l, losses_l, "r-", lw=1.5, label="L-BFGS")
+    ax.set_xlabel("Epoch", fontsize=14)
+    ax.set_ylabel("Total loss", fontsize=14)
+    title_suffix = []
+    if data_augmented:
+        title_suffix.append("data-augmented")
+    if run_tag:
+        title_suffix.append(f"tag={run_tag}")
+    ax.set_title(
+        "PINN training loss - Gaussian dispersion"
+        + (f" ({', '.join(title_suffix)})" if title_suffix else ""),
+        fontsize=15,
+    )
+    ax.legend(fontsize=12)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    figure_path = (FIGURE_PATHS["training_loss_gaussian_dispersion"] if not run_tag
+                   else FIGURE_PATHS["training_loss_gaussian_dispersion"].replace(".png", f"__{run_tag}.png"))
+    _safe_save_figure(fig, figure_path, dpi=300)
+    plt.close(fig)
+
+    heldout_mse = None
+    if data_augmented and xi_data_val is not None:
+        with torch.no_grad():
+            a_val_p, b_val_p = model(xi_data_val, tau_data_val)
+            heldout_mse = float(torch.mean(
+                (a_val_p - a_data_val) ** 2 + (b_val_p - b_data_val) ** 2
+            ).item())
+        print(f"[gaussian] held-out supervised MSE: {heldout_mse:.4e}")
+
+    metadata_path = f"logs/{case_tag}_training_metadata.json"
+    _safe_write_json({
+        "case": "gaussian_dispersion_only",
+        "data_augmented": data_augmented,
+        "lambda_data": lambdas_gauss["data"],
+        "run_tag": run_tag,
+        "n_supervised_points": int(len(train_flat_idx)),
+        "n_supervised_train": int(len(train_flat_idx)),
+        "n_supervised_val": int(len(val_flat_idx)),
+        "supervised_train_seed": 27182 if data_augmented else None,
+        "supervised_val_seed": 314159 if data_augmented else None,
+        "heldout_supervised_mse": heldout_mse,
+        "training_profile": profile,
+        "seed": seed,
+        "adam_time_s": adam_time,
+        "lbfgs_time_s": lbfgs_time,
+        "total_time_s": total_time,
+        "full_domain_relative_l2": rel_l2_full,
+        "pulse_region_relative_l2": rel_l2_pulse,
+        "model_path": model_path,
+        "history_path": history_path,
+        "figure_path": figure_path,
+        "dataset_path": "data/dispersion_broadening_ground_truth.npz",
+    }, metadata_path)
+
+    outputs = {
+        "case": "gaussian_dispersion" + ("_data_augmented" if data_augmented else "")
+                + (f"__{run_tag}" if run_tag else ""),
+        "model_path": model_path,
+        "history_path": history_path,
+        "metadata_path": metadata_path,
+    }
+    return _assert_training_artifacts(outputs)
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Train PINN-NLSE cases")
+    parser.add_argument("--case", choices=["soliton", "gaussian_dispersion"],
+                        default="soliton")
+    parser.add_argument("--profile", choices=["smoke", "baseline", "full"],
+                        default="baseline")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--skip-lbfgs", action="store_true",
+                        help="Run Adam only and save an honestly labeled Adam-only result")
+    parser.add_argument("--lbfgs-collocation", type=int, default=None,
+                        help="Override max collocation points for L-BFGS refinement")
+    parser.add_argument("--data-augmented", action="store_true",
+                        help="Add SSFM supervision (lambda_data=1.0) for data-augmented recovery")
+    parser.add_argument("--run-tag", type=str, default=None,
+                        help="Optional run identifier appended to artifact filenames "
+                             "(e.g. --run-tag verify-2026-05-10). Without this flag the "
+                             "canonical published files are auto-archived with a UTC "
+                             "timestamp before being overwritten.")
+    args = parser.parse_args()
+
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+
+    if args.case == "soliton":
+        out = run_soliton_training(
+            profile=args.profile, seed=args.seed,
+            skip_lbfgs=args.skip_lbfgs,
+            lbfgs_max_collocation=args.lbfgs_collocation,
+            data_augmented=args.data_augmented,
+            run_tag=args.run_tag,
+        )
+    elif args.case == "gaussian_dispersion":
+        out = run_gaussian_dispersion_training(
+            profile=args.profile, seed=args.seed,
+            skip_lbfgs=args.skip_lbfgs,
+            lbfgs_max_collocation=args.lbfgs_collocation,
+            data_augmented=args.data_augmented,
+            run_tag=args.run_tag,
+        )
+
+    print("\nArtifacts:")
+    for k, v in out.items():
+        print(f"  {k}: {v}")
+
+
+if __name__ == "__main__":
+    main()
