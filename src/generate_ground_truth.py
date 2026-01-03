@@ -99,3 +99,85 @@ def assert_boundary_leakage_ok(u_hist, tolerance: float = 1e-6,
 
 # ---------------------------------------------------------------------------
 # Per-dataset generators
+# ---------------------------------------------------------------------------
+
+def _save_npz(path: str, **kwargs) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    np.savez_compressed(path, **kwargs)
+    print(f"  saved: {path}")
+
+
+def _close_all_figs() -> None:
+    plt.close("all")
+
+
+def generate_soliton(tau, omega, dtau) -> tuple[np.ndarray, np.ndarray]:
+    """N=1 fundamental soliton — primary PINN test case."""
+    u0 = sech_pulse(tau)
+    xi_arr, u_hist = ssfm_propagate(
+        u0, tau, omega,
+        xi_max=XI_MAX, N_z=N_Z,
+        s=S_SIGN, N_sq=float(N_SOLITON ** 2),
+    )
+    assert_boundary_leakage_ok(u_hist, label="soliton")
+
+    _save_npz(
+        "data/soliton_ground_truth.npz",
+        schema_version="1.1",
+        case_name="soliton_N1",
+        tau=tau, xi=xi_arr, u_hist=u_hist,
+        dtau=dtau, s=S_SIGN, N_sq=float(N_SOLITON ** 2),
+        ic_type="sech",
+        case_type="soliton",
+        dispersion_disabled=False,
+        equation="i*u_xi + (s/2)*u_tautau + N_sq*|u|^2*u = 0",
+        description="N=1 soliton propagation via SSFM (Agrawal convention, s=+1)",
+        **ground_truth_metadata(u_hist, xi_arr, tau, omega, TAU_MAX, dtau),
+    )
+
+    plot_propagation_map(
+        u_hist, tau, xi_arr,
+        title=f"N={N_SOLITON} Soliton — SSFM Ground Truth",
+        save_path=FIGURE_PATHS["gt_soliton_propagation"],
+        show=False,
+    )
+    _close_all_figs()
+    return xi_arr, u_hist
+
+
+def generate_dispersion(tau, omega, dtau) -> tuple[np.ndarray, np.ndarray]:
+    """Gaussian pulse, normal dispersion, no nonlinearity. Validates against analytical."""
+    u0 = gaussian_pulse(tau)
+    xi_arr, u_hist = ssfm_propagate(
+        u0, tau, omega,
+        xi_max=XI_MAX, N_z=N_Z,
+        s=-1, N_sq=0.0,
+    )
+    assert_boundary_leakage_ok(u_hist, label="dispersion-only Gaussian")
+
+    # Analytical solution: u(xi,tau) = (1/sqrt(1 + i*s*xi)) * exp(-tau^2 / (2*(1 + i*s*xi)))
+    q = 1.0 + 1j * (-1) * xi_arr[:, None]  # s = -1
+    u_exact = (1.0 / np.sqrt(q)) * np.exp(-(tau[None, :] ** 2) / (2.0 * q))
+    rel_l2 = (
+        np.linalg.norm(u_hist[-1] - u_exact[-1]) /
+        np.linalg.norm(u_exact[-1])
+    )
+    assert rel_l2 < 1e-2, f"dispersion analytical check failed: rel L2 = {rel_l2:.2e}"
+
+    def rms_width(tau_arr, u):
+        intensity = np.abs(u) ** 2
+        norm = trapezoid(intensity, tau_arr, axis=-1)
+        mean_tau = trapezoid(intensity * tau_arr[None, :], tau_arr, axis=-1) / norm
+        variance = trapezoid(
+            intensity * (tau_arr[None, :] - mean_tau[:, None]) ** 2,
+            tau_arr, axis=-1,
+        ) / norm
+        return np.sqrt(variance)
+
+    width_num = rms_width(tau, u_hist)
+    width_exact = rms_width(tau, u_exact)
+    width_rel_err = float(np.max(np.abs(width_num - width_exact) / width_exact))
+    assert width_rel_err < 2e-2, f"dispersion width check failed: max rel err = {width_rel_err:.2e}"
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.plot(xi_arr, width_num, lw=2, label="SSFM")
