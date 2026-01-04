@@ -358,3 +358,71 @@ def verify_saved_data(paths: list[str]) -> None:
     soliton = np.load("data/soliton_ground_truth.npz", allow_pickle=False)
     u_exact = (1.0 / np.cosh(soliton["tau"]))[None, :] * np.exp(0.5j * soliton["xi"][:, None])
     complex_err = float(np.max(np.abs(soliton["u_hist"] - u_exact)))
+    intensity_err = float(np.max(np.abs(np.abs(soliton["u_hist"]) ** 2 - np.abs(u_exact) ** 2)))
+    # N_z=1000 default: complex_err ~ 1e-5, intensity_err ~ 4e-6 (Strang O(dxi^2))
+    assert complex_err < 1e-3, f"saved soliton complex error: {complex_err:.2e}"
+    assert intensity_err < 1e-5, f"saved soliton intensity error: {intensity_err:.2e}"
+    print(f"  soliton bulk: complex_err={complex_err:.2e}, intensity_err={intensity_err:.2e}")
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+
+def generate_all(include_optional: bool = True,
+                 optional_tau_max: float = 30.0,
+                 verify: bool = True) -> dict:
+    """Generate all ground-truth datasets and return a summary dict.
+
+    The optional Gaussian + anomalous + Kerr case broadens beyond the default
+    TAU_MAX=20 window; we use a wider window (default 30) just for that dataset.
+    """
+    os.makedirs("data", exist_ok=True)
+    os.makedirs("figures", exist_ok=True)
+
+    tau, omega, dtau = create_grid(N_t=N_T, tau_window=TAU_MAX)
+    print(f"Grid: N_T={N_T}, tau_window={TAU_MAX}, dtau={dtau:.6f}, N_z={N_Z}, xi_max={XI_MAX}")
+
+    print("\n[1/4] N=1 soliton")
+    generate_soliton(tau, omega, dtau)
+    print("\n[2/4] Gaussian dispersion-only")
+    generate_dispersion(tau, omega, dtau)
+    print("\n[3/4] Self-phase modulation (s=0 switch)")
+    generate_spm(tau, omega, dtau)
+
+    saved = [
+        "data/soliton_ground_truth.npz",
+        "data/dispersion_broadening_ground_truth.npz",
+        "data/spm_ground_truth.npz",
+    ]
+
+    if include_optional:
+        print(f"\n[4/4] Optional: Gaussian + anomalous + Kerr (tau_window={optional_tau_max} for boundary safety)")
+        try:
+            generate_nonlinear_gaussian(tau, omega, dtau, tau_max_override=optional_tau_max)
+            saved.append("data/gaussian_nonlinear_ground_truth.npz")
+        except AssertionError as exc:
+            print(f"  WARNING: optional dataset skipped due to boundary leakage: {exc}")
+
+    if verify:
+        print("\nVerifying saved data...")
+        verify_saved_data(saved)
+
+    summary = {
+        "saved_paths": saved,
+        "config": {
+            "N_T": int(N_T), "N_Z": int(N_Z),
+            "tau_max": float(TAU_MAX), "xi_max": float(XI_MAX),
+            "s_default": int(S_SIGN), "N_soliton": int(N_SOLITON),
+        },
+        "verified": bool(verify),
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    with open("data/ground_truth_summary.json", "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+    print(f"\nSummary saved: data/ground_truth_summary.json")
+    return summary
+
+
+if __name__ == "__main__":
+    generate_all()
