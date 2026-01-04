@@ -277,3 +277,84 @@ def generate_nonlinear_gaussian(tau, omega, dtau,
     """
     if tau_max_override is not None and tau_max_override != TAU_MAX:
         tau_local, omega_local, dtau_local = create_grid(
+            N_t=N_T, tau_window=tau_max_override
+        )
+        tau_max_used = tau_max_override
+    else:
+        tau_local, omega_local, dtau_local = tau, omega, dtau
+        tau_max_used = TAU_MAX
+
+    u0 = gaussian_pulse(tau_local)
+    xi_arr, u_hist = ssfm_propagate(
+        u0, tau_local, omega_local,
+        xi_max=XI_MAX, N_z=N_Z,
+        s=S_SIGN, N_sq=float(N_SOLITON ** 2),
+    )
+    assert_boundary_leakage_ok(u_hist, label="nonlinear Gaussian")
+    # Rebind names so the rest of the function uses the (possibly extended) grid.
+    tau, omega, dtau = tau_local, omega_local, dtau_local
+    TAU_MAX_LOCAL = tau_max_used
+    # We rebind the module-level TAU_MAX only inside the metadata call:
+    # the metadata helper takes tau_max as an explicit argument.
+
+    _save_npz(
+        "data/gaussian_nonlinear_ground_truth.npz",
+        schema_version="1.1",
+        case_name="gaussian_nonlinear_anomalous",
+        tau=tau, xi=xi_arr, u_hist=u_hist,
+        dtau=dtau, s=S_SIGN, N_sq=float(N_SOLITON ** 2),
+        ic_type="gaussian",
+        case_type="gaussian_nonlinear",
+        dispersion_disabled=False,
+        equation="i*u_xi + (s/2)*u_tautau + N_sq*|u|^2*u = 0",
+        description="Gaussian pulse in anomalous dispersion with N_sq=1 via SSFM",
+        **ground_truth_metadata(u_hist, xi_arr, tau, omega, TAU_MAX_LOCAL, dtau),
+    )
+
+    plot_propagation_map(
+        u_hist, tau, xi_arr,
+        title="Gaussian Pulse in Anomalous Dispersion - SSFM Ground Truth",
+        save_path=FIGURE_PATHS["gt_gaussian_nonlinear"],
+        show=False,
+    )
+    _close_all_figs()
+    return xi_arr, u_hist
+
+
+# ---------------------------------------------------------------------------
+# Verification of saved data
+# ---------------------------------------------------------------------------
+
+REQUIRED_KEYS = [
+    "schema_version", "case_name", "tau", "xi", "omega", "u_hist",
+    "dtau", "dxi", "N_T", "N_Z", "tau_max", "xi_max",
+    "s", "N_sq", "ic_type", "case_type", "dispersion_disabled", "equation",
+    "u_dtype", "tau_dtype", "max_boundary_intensity", "generated_at_utc",
+    "pinn_repo_commit", "ssfm_source_commit", "ssfm_source_path",
+]
+
+
+def verify_saved_data(paths: list[str]) -> None:
+    for path in paths:
+        data = np.load(path, allow_pickle=False)
+        for key in REQUIRED_KEYS:
+            assert key in data, f"{path} missing required key: {key}"
+        assert data["tau"].shape == (N_T,), f"{path}: tau shape mismatch"
+        assert data["omega"].shape == (N_T,), f"{path}: omega shape mismatch"
+        assert data["u_hist"].shape == (len(data["xi"]), N_T), f"{path}: u_hist shape mismatch"
+        assert int(data["N_T"]) == N_T, f"{path}: N_T metadata mismatch"
+        assert int(data["N_Z"]) == len(data["xi"]) - 1, f"{path}: N_Z metadata mismatch"
+        assert np.isclose(float(data["dxi"]), data["xi"][1] - data["xi"][0]), f"{path}: dxi mismatch"
+        assert np.iscomplexobj(data["u_hist"]), f"{path}: u_hist must be complex"
+        assert float(data["max_boundary_intensity"]) < 1e-6, f"{path}: boundary leakage too large"
+
+    # SPM-specific guards
+    spm = np.load("data/spm_ground_truth.npz", allow_pickle=False)
+    assert str(np.asarray(spm["case_type"])) == "spm_no_dispersion"
+    assert bool(np.asarray(spm["dispersion_disabled"])) is True
+    assert float(np.asarray(spm["s"])) == 0.0, "SPM uses s=0 only as a no-dispersion switch"
+
+    # Soliton complex/intensity acid test (using config N_z; this is bulk dataset, not 2.2 verification)
+    soliton = np.load("data/soliton_ground_truth.npz", allow_pickle=False)
+    u_exact = (1.0 / np.cosh(soliton["tau"]))[None, :] * np.exp(0.5j * soliton["xi"][:, None])
+    complex_err = float(np.max(np.abs(soliton["u_hist"] - u_exact)))
