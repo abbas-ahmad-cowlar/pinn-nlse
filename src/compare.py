@@ -201,3 +201,85 @@ def plot_case_figures(u_ssfm: np.ndarray, u_pinn: np.ndarray,
     plt.close(fig_err)
 
     # Cross-section overlays at ξ = 0, ξ_max/2, ξ_max
+    xi_slices = [0.0, float(xi[-1]) / 2.0, float(xi[-1])]
+    xi_indices = [int(np.argmin(np.abs(xi - x))) for x in xi_slices]
+    fig_x, axes_x = plt.subplots(1, 3, figsize=(16, 4), sharey=True)
+    for ax, idx, xi_val in zip(axes_x, xi_indices, xi_slices):
+        ax.plot(tau_vis, int_ssfm[idx, tau_mask], "b-", lw=2.0, label="SSFM")
+        ax.plot(tau_vis, int_pinn[idx, tau_mask], "r--", lw=2.0, label="PINN")
+        ax.set_xlabel(r"$\tau$", fontsize=11)
+        ax.set_title(rf"$\xi = {xi_val:.2f}$", fontsize=12)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=9)
+    axes_x[0].set_ylabel(r"$|u|^2$", fontsize=12)
+    fig_x.suptitle(f"{title} - cross sections", fontsize=14)
+    fig_x.tight_layout()
+    xs_path = FIGURE_PATHS[cross_section_key]
+    _safe_save_fig(fig_x, xs_path)
+    plt.close(fig_x)
+
+    return {"comparison": comp_path, "error_map": err_path, "cross_section": xs_path}
+
+
+# ---------------------------------------------------------------------------
+# Per-case orchestrators
+# ---------------------------------------------------------------------------
+
+def _ensure_ground_truth_present(data_path: str) -> None:
+    """Auto-regenerate the SSFM ground-truth `.npz` files if any are missing.
+
+    The ground-truth datasets are large (~10 MB each) and gitignored. On a fresh
+    clone they will not exist; this helper transparently re-runs the
+    deterministic generation pipeline so `python -m src.compare` and
+    `notebooks/03_comparison.ipynb` work out-of-the-box without forcing the
+    user to first open `notebooks/01_ssfm_validation.ipynb`. Generation is
+    deterministic (seeded SSFM solves) and takes ~30 seconds on CPU.
+    """
+    if os.path.exists(data_path):
+        return
+    print(f"[compare] {data_path} missing — regenerating SSFM ground-truth datasets "
+          f"via src.generate_ground_truth.generate_all() (~30 s on CPU)...")
+    from src.generate_ground_truth import generate_all
+    generate_all(include_optional=True)
+    if not os.path.exists(data_path):
+        raise FileNotFoundError(
+            f"Auto-regeneration ran but {data_path} still missing — "
+            "open notebooks/01_ssfm_validation.ipynb to investigate."
+        )
+
+
+def generate_case_comparison(case: str, data_path: str,
+                             s: float, N_sq: float, ic_type: str,
+                             comparison_key: str, error_key: str,
+                             cross_section_key: str,
+                             explicit_metadata_path: Optional[str] = None) -> dict:
+    """Load one SSFM dataset + trained PINN, generate figures, return metrics dict."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    _ensure_ground_truth_present(data_path)
+    gt = load_ground_truth_npz(data_path)
+    model = PINN_NLSE(
+        n_hidden=5, n_neurons=128, s=s, N_sq=N_sq,
+        xi_max=float(gt["xi_max"]), tau_max=float(gt["tau_max"]),
+    ).to(device)
+    assert_case_matches_model(gt, model, expected_ic_type=ic_type)
+
+    model_path, metadata = resolve_model_path(case, explicit_metadata_path)
+    model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
+
+    u_pinn = evaluate_model_on_grid(model, gt["xi"], gt["tau"], device)
+    u_ssfm = gt["u_hist"]
+
+    aug_tag = " (data-augmented)" if "_data_augmented_" in model_path else ""
+    title = f"{case}: PINN vs SSFM" + aug_tag
+    paths = plot_case_figures(
+        u_ssfm, u_pinn, gt["tau"], gt["xi"],
+        comparison_key, error_key, cross_section_key, title,
+    )
+
+    metrics = compute_error_metrics(u_pinn, u_ssfm)
+    pulse_mask = np.broadcast_to((np.abs(gt["tau"]) <= 10)[None, :], u_ssfm.shape)
+    metrics["pulse_region_relative_l2"] = compute_masked_relative_l2_error(
+        u_pinn, u_ssfm, pulse_mask,
+    )
+    # Cast NumPy floats to plain floats for clean printing/JSON export.
+    metrics = {k: float(v) for k, v in metrics.items()}
