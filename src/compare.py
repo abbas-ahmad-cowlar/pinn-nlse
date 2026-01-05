@@ -76,3 +76,49 @@ def resolve_model_path(case: str,
     metadata: dict = {}
     candidate_meta = (
         [explicit_metadata_path] if explicit_metadata_path else []
+    ) + _candidate_metadata_paths(case)
+
+    for p in candidate_meta:
+        if p and os.path.exists(p):
+            with open(p, "r", encoding="utf-8") as f:
+                metadata = json.load(f)
+            break
+
+    # Always prefer the canonical search order (published/ first) so frozen
+    # release artifacts are never silently bypassed in favor of local artifacts.
+    # The metadata's `model_path` is a fallback for unusual layouts only.
+    candidate_models = list(_candidate_model_paths(case))
+    if metadata.get("model_path"):
+        candidate_models.append(metadata["model_path"])
+
+    for p in candidate_models:
+        if p and os.path.exists(p):
+            return p, metadata
+
+    raise FileNotFoundError(
+        f"No PINN weights found for case={case!r}. "
+        f"Searched: {candidate_models}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Forward pass on the SSFM grid
+# ---------------------------------------------------------------------------
+
+def evaluate_model_on_grid(model: PINN_NLSE,
+                           xi: np.ndarray, tau: np.ndarray,
+                           device: torch.device) -> np.ndarray:
+    """Evaluate a trained PINN on the SSFM grid, returning a complex 2D array."""
+    N_xi, N_tau = len(xi), len(tau)
+    xi_grid = torch.tensor(np.repeat(xi, N_tau), dtype=torch.float32).unsqueeze(1).to(device)
+    tau_grid = torch.tensor(np.tile(tau, N_xi), dtype=torch.float32).unsqueeze(1).to(device)
+    model.eval()
+    with torch.no_grad():
+        a, b = model(xi_grid, tau_grid)
+    a = a.cpu().numpy().reshape(N_xi, N_tau)
+    b = b.cpu().numpy().reshape(N_xi, N_tau)
+    return a + 1j * b
+
+
+# ---------------------------------------------------------------------------
+# Figure generation
