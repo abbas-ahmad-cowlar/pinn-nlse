@@ -192,3 +192,89 @@ def run_speed_benchmark(
             "pinn_forward_summary": f_summary,
             "pinn_end_to_end_summary": e_summary,
         })
+
+        print(f"  N={n_runs:3d}  ssfm={s_summary['median']:.3f}s  "
+              f"pinn_fwd={f_summary['median']:.3f}s  "
+              f"pinn_e2e={e_summary['median']:.3f}s")
+
+    # Plot: log-log with IQR error bars
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.errorbar(n_runs_list, ssfm_times, yerr=np.array(ssfm_iqr).T,
+                fmt="bo-", lw=2, ms=8, capsize=4, label="SSFM (median ± IQR)")
+    ax.errorbar(n_runs_list, pinn_fwd_times, yerr=np.array(pinn_fwd_iqr).T,
+                fmt="rs--", lw=2, ms=8, capsize=4, label="PINN forward-only")
+    ax.errorbar(n_runs_list, pinn_e2e_times, yerr=np.array(pinn_e2e_iqr).T,
+                fmt="m^-", lw=2, ms=8, capsize=4, label="PINN end-to-end")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("Number of repeated fixed-case evaluations  $N_{\\rm runs}$", fontsize=13)
+    ax.set_ylabel("Total computation time (s)", fontsize=13)
+    ax.set_title(f"Speed benchmark: SSFM vs PINN ({benchmark_label})", fontsize=14)
+    ax.legend(fontsize=11, loc="best")
+    ax.grid(True, which="both", alpha=0.3)
+    fig.tight_layout()
+    if figure_path is None:
+        figure_path = FIGURE_PATHS["speed_benchmark"]
+    os.makedirs(os.path.dirname(figure_path) or ".", exist_ok=True)
+    _archive_existing(figure_path)
+    fig.savefig(figure_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    # JSON log
+    payload = {
+        "benchmark_mode": benchmark_mode,
+        "benchmark_label": benchmark_label,
+        "device": str(device),
+        "case": case,
+        "model_path": model_path,
+        "model_metadata_profile": metadata.get("training_profile"),
+        "model_metadata_data_augmented": metadata.get("data_augmented"),
+        "dataset_path": "data/soliton_ground_truth.npz",
+        "grid": {
+            "N_tau": int(n_tau),
+            "N_xi": int(N_eval),
+            "N_z": int(n_z),
+            "xi_max": float(xi_max),
+            "s": s_val,
+            "N_sq": nsq,
+        },
+        "n_runs_list": list(map(int, n_runs_list)),
+        "benchmark_repeats": int(benchmark_repeats),
+        "ssfm_median_times": ssfm_times,
+        "pinn_forward_median_times": pinn_fwd_times,
+        "pinn_end_to_end_median_times": pinn_e2e_times,
+        "records": records,
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "note": (
+            "Training time excluded; timing measures repeated fixed-case "
+            "inference/solve after artifacts already exist. This is NOT a "
+            "parameter-sweep benchmark — that would require a "
+            "parameter-conditioned PINN."
+        ),
+    }
+    os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
+    _archive_existing(log_path)
+    with open(log_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+    # Print headline table
+    print(f"\n{'N_runs':>8} | {'SSFM (s)':>10} | {'PINN fwd (s)':>14} | {'PINN e2e (s)':>14} | {'fwd speedup':>12} | {'e2e speedup':>12}")
+    print("-" * 80)
+    for n, t_s, t_pf, t_pe in zip(n_runs_list, ssfm_times, pinn_fwd_times, pinn_e2e_times):
+        fwd_sx = t_s / t_pf if t_pf > 0 else float("inf")
+        e2e_sx = t_s / t_pe if t_pe > 0 else float("inf")
+        print(f"{n:>8d} | {t_s:>10.3f} | {t_pf:>14.3f} | {t_pe:>14.3f} | {fwd_sx:>11.2f}x | {e2e_sx:>11.2f}x")
+
+    print(f"\nSaved figure: {figure_path}")
+    print(f"Saved log:    {log_path}")
+    return payload
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="SSFM vs PINN speed benchmark")
+    parser.add_argument("--mode", choices=["cpu_fair", "available_hardware"], default="cpu_fair")
+    parser.add_argument("--repeats", type=int, default=BENCHMARK_REPEATS_DEFAULT)
+    args = parser.parse_args()
+    run_speed_benchmark(benchmark_mode=args.mode, benchmark_repeats=args.repeats)
