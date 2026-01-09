@@ -283,3 +283,70 @@ def generate_case_comparison(case: str, data_path: str,
     )
     # Cast NumPy floats to plain floats for clean printing/JSON export.
     metrics = {k: float(v) for k, v in metrics.items()}
+
+    print(f"\n{case} metrics ({device})")
+    print(f"  model_path        : {model_path}")
+    print(f"  data_augmented    : {'_data_augmented_' in model_path}")
+    if metadata:
+        print(f"  metadata profile  : {metadata.get('training_profile', '?')}")
+        print(f"  reported pulse-L2 : {metadata.get('pulse_region_relative_l2', '?')}")
+    for k in ("relative_l2", "pulse_region_relative_l2", "mse", "max_pointwise", "mean_abs"):
+        print(f"  {k:<18}: {metrics[k]:.6e}")
+
+    return {
+        "case": case,
+        "model_path": model_path,
+        "metadata": metadata,
+        "metrics": metrics,
+        "figure_paths": paths,
+    }
+
+
+def generate_soliton_comparison() -> dict:
+    return generate_case_comparison(
+        case="soliton",
+        data_path="data/soliton_ground_truth.npz",
+        s=1, N_sq=1.0, ic_type="sech",
+        comparison_key="comparison_soliton",
+        error_key="error_map_soliton",
+        cross_section_key="cross_section_soliton",
+    )
+
+
+def generate_gaussian_dispersion_comparison() -> dict:
+    return generate_case_comparison(
+        case="gaussian_dispersion",
+        data_path="data/dispersion_broadening_ground_truth.npz",
+        s=-1, N_sq=0.0, ic_type="gaussian",
+        comparison_key="comparison_gaussian_dispersion",
+        error_key="error_map_gaussian_dispersion",
+        cross_section_key="cross_section_gaussian_dispersion",
+    )
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Generate PINN-NLSE comparison figures and metric tables.",
+    )
+    parser.add_argument(
+        "--case",
+        choices=["soliton", "gaussian_dispersion", "all"],
+        default="soliton",
+        help="Which case to render. 'all' regenerates both.",
+    )
+    args = parser.parse_args()
+
+    if args.case in ("soliton", "all"):
+        generate_soliton_comparison()
+    if args.case in ("gaussian_dispersion", "all"):
+        generate_gaussian_dispersion_comparison()
+
+
+if __name__ == "__main__":
+    main()
