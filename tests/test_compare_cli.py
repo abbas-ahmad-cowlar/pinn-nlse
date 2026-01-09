@@ -76,3 +76,21 @@ def test_soliton_comparison_runs_and_produces_metrics():
     # Expected output figures exist after the call
     for key in ("comparison", "error_map", "cross_section"):
         assert Path(result["figure_paths"][key]).exists()
+
+
+@pytest.mark.timeout(180)
+def test_gaussian_dispersion_comparison_runs():
+    if not Path("models/published/gaussian_dispersion_data_augmented_final.pt").exists():
+        pytest.skip("no published gaussian weights")
+    if not Path("data/dispersion_broadening_ground_truth.npz").exists():
+        pytest.skip("no gaussian dispersion ground truth .npz")
+
+    os.environ["MPLBACKEND"] = "Agg"
+    from src.compare import generate_gaussian_dispersion_comparison
+
+    result = generate_gaussian_dispersion_comparison()
+    m = result["metrics"]
+    # Plan threshold: pulse-region rel L2 < 10 %.
+    assert m["pulse_region_relative_l2"] < 0.10, (
+        f"Pulse-region rel L2 above 10 %: {m['pulse_region_relative_l2']}"
+    )
