@@ -107,3 +107,34 @@ def test_data_points_are_disjoint_with_held_out_indices():
         data["u_hist"], data["xi"], data["tau"], N_data=200, seed=22,
         exclude_flat_indices=set(train_idx.tolist()),
         return_indices=True,
+    )
+    assert len(set(train_idx.tolist()).intersection(set(val_idx.tolist()))) == 0
+
+
+# -- Dataset/model guard --------------------------------------------------------
+
+class _Model:
+    s = 1
+    N_sq = 1.0
+
+
+def test_assert_case_matches_model_passes_for_correct_pairing():
+    data = load_ground_truth_npz("data/soliton_ground_truth.npz")
+    assert assert_case_matches_model(data, _Model(), expected_ic_type="sech")
+
+
+def test_assert_case_matches_model_raises_for_sign_mismatch():
+    data = load_ground_truth_npz("data/soliton_ground_truth.npz")
+
+    class WrongSign:
+        s = -1
+        N_sq = 1.0
+
+    with pytest.raises(ValueError, match="sign mismatch"):
+        assert_case_matches_model(data, WrongSign())
+
+
+def test_assert_case_matches_model_raises_for_ic_mismatch():
+    data = load_ground_truth_npz("data/soliton_ground_truth.npz")
+    with pytest.raises(ValueError, match="IC mismatch"):
+        assert_case_matches_model(data, _Model(), expected_ic_type="gaussian")
