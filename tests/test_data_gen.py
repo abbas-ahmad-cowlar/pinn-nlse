@@ -44,3 +44,97 @@ def test_collocation_sobol_method():
     assert xi.requires_grad is True
     assert tau.requires_grad is True
 
+
+def test_collocation_unknown_method_raises():
+    with pytest.raises(ValueError, match="Unknown collocation"):
+        generate_collocation_points(10, XI_MAX, TAU_MAX, method="halton")
+
+
+# -- IC -------------------------------------------------------------------------
+
+def test_ic_sech_peak_and_zero_imag():
+    xi, tau, a, b = generate_ic_points(N_IC_POINTS, TAU_MAX, "sech")
+    assert torch.all(xi == 0)
+    assert torch.allclose(a[N_IC_POINTS // 2], torch.tensor([[1.0]]), atol=0.01)
+    assert torch.all(b == 0)
+    # endpoint exclusion: the last sampled tau must be < +tau_max
+    assert tau.max() < TAU_MAX
+
+
+def test_ic_gaussian_variant():
+    xi, tau, a, b = generate_ic_points(100, TAU_MAX, "gaussian")
+    assert torch.allclose(a[50], torch.tensor([[1.0]]), atol=0.01)
+    assert torch.all(b == 0)
+
+
+def test_ic_unknown_function_raises():
+    with pytest.raises(ValueError, match="Unknown IC"):
+        generate_ic_points(10, TAU_MAX, "lorentzian")
+
+
+# -- BC -------------------------------------------------------------------------
+
+def test_bc_split_and_zero_labels():
+    xi, tau, a, b = generate_bc_points(N_BC_POINTS, XI_MAX, TAU_MAX)
+    assert xi.shape == (N_BC_POINTS, 1)
+    assert torch.all(a == 0) and torch.all(b == 0)
+    assert torch.any(tau == -TAU_MAX) and torch.any(tau == TAU_MAX)
+
+
+# -- Data sampler --------------------------------------------------------------
+
+def test_load_ground_truth_npz_validates_schema():
+    data = load_ground_truth_npz("data/soliton_ground_truth.npz")
+    assert "u_hist" in data
+    assert np.iscomplexobj(data["u_hist"])
+
+
+def test_assert_boundary_decay_passes_on_soliton():
+    data = load_ground_truth_npz("data/soliton_ground_truth.npz")
+    # Should not raise; sech(20) tail amplitude squared is ~1.7e-17.
+    assert_boundary_decay(data) < 1e-6
+
+
+def test_data_points_are_disjoint_with_held_out_indices():
+    data = load_ground_truth_npz("data/soliton_ground_truth.npz")
+    xi_t, tau_t, a_t, b_t, train_idx = generate_data_points(
+        data["u_hist"], data["xi"], data["tau"], N_data=400, seed=11, return_indices=True,
+    )
+    assert xi_t.shape == (400, 1)
+    assert a_t.dtype == torch.float32
+
+    xi_v, tau_v, a_v, b_v, val_idx = generate_data_points(
+        data["u_hist"], data["xi"], data["tau"], N_data=200, seed=22,
+        exclude_flat_indices=set(train_idx.tolist()),
+        return_indices=True,
+    )
+    assert len(set(train_idx.tolist()).intersection(set(val_idx.tolist()))) == 0
+
+
+# -- Dataset/model guard --------------------------------------------------------
+
+class _Model:
+    s = 1
+    N_sq = 1.0
+
+
+def test_assert_case_matches_model_passes_for_correct_pairing():
+    data = load_ground_truth_npz("data/soliton_ground_truth.npz")
+    assert assert_case_matches_model(data, _Model(), expected_ic_type="sech")
+
+
+def test_assert_case_matches_model_raises_for_sign_mismatch():
+    data = load_ground_truth_npz("data/soliton_ground_truth.npz")
+
+    class WrongSign:
+        s = -1
+        N_sq = 1.0
+
+    with pytest.raises(ValueError, match="sign mismatch"):
+        assert_case_matches_model(data, WrongSign())
+
+
+def test_assert_case_matches_model_raises_for_ic_mismatch():
+    data = load_ground_truth_npz("data/soliton_ground_truth.npz")
+    with pytest.raises(ValueError, match="IC mismatch"):
+        assert_case_matches_model(data, _Model(), expected_ic_type="gaussian")
