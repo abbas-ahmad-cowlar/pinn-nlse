@@ -1,0 +1,18 @@
+{
+  "saved_paths": [
+    "data/soliton_ground_truth.npz",
+    "data/dispersion_broadening_ground_truth.npz",
+    "data/spm_ground_truth.npz",
+    "data/gaussian_nonlinear_ground_truth.npz"
+  ],
+  "config": {
+    "N_T": 1024,
+    "N_Z": 1000,
+    "tau_max": 20.0,
+    "xi_max": 5.0,
+    "s_default": 1,
+    "N_soliton": 1
+  },
+  "verified": true,
+  "generated_at_utc": "2026-05-10T10:27:44.042170+00:00"
+}
