@@ -1,0 +1,12 @@
+{
+  "copied_at_utc": "2026-05-10T10:16:03.173731+00:00",
+  "ssfm_source_path": "../2-Split_Step_Fourier_Solver/src/nlse_ssfm",
+  "ssfm_source_package": "nlse_ssfm",
+  "ssfm_source_commit": "90b50b0",
+  "pinn_repo_commit_at_copy": "90b50b0",
+  "validation_summary": "Companion nlse_ssfm soliton, energy, and convergence tests passed before copy.",
+  "files_copied": [
+    "src/ssfm.py",
+    "src/nlse_utils.py"
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "Nz_values": [
+    100,
+    200,
+    400,
+    800,
+    1600
+  ],
+  "dxi_values": [
+    0.02,
+    0.01,
+    0.005,
+    0.0025,
+    0.00125
+  ],
+  "relative_l2_errors": [
+    5.88021031716935e-05,
+    1.4702986457325079e-05,
+    3.6759021142580233e-06,
+    9.189920470308463e-07,
+    2.297765332591973e-07
+  ],
+  "fitted_slope": 1.9998897999808023,
+  "slope_fit_Nz_values": [
+    100,
+    200,
+    400,
+    800,
+    1600
+  ],
+  "slope_fit_note": "Fit excludes points at numerical floor or temporal-discretization saturation.",
+  "xi_test": 2.0,
+  "method": "symmetric Strang SSFM",
+  "soliton_acid_test": {
+    "N_z": 2000,
+    "xi_max": 5.0,
+    "complex_max_error": 2.772924882233703e-06,
+    "intensity_max_error": 9.737410641141864e-07,
+    "energy_max_drift": 6.290523657526137e-13,
+    "note": "Verification uses N_z=2000 to satisfy strict pointwise 1e-6; bulk ground truth uses N_z=1000 default."
+  }
+}
