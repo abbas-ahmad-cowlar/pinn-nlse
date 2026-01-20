@@ -1,0 +1,21 @@
+{
+  "case": "gaussian_dispersion_only",
+  "data_augmented": true,
+  "lambda_data": 1.0,
+  "n_supervised_points": 500,
+  "n_supervised_train": 500,
+  "n_supervised_val": 1000,
+  "supervised_train_seed": 27182,
+  "supervised_val_seed": 314159,
+  "heldout_supervised_mse": 0.0008315881714224815,
+  "training_profile": "baseline",
+  "seed": 42,
+  "adam_time_s": 1148.9473044872284,
+  "lbfgs_time_s": 32.63799786567688,
+  "total_time_s": 1181.5853595733643,
+  "full_domain_relative_l2": 0.11288878718448433,
+  "pulse_region_relative_l2": 0.09289611839345105,
+  "model_path": "models/gaussian_dispersion_data_augmented_final.pt",
+  "history_path": "logs/gaussian_dispersion_data_augmented_training_history.json",
+  "dataset_path": "data/dispersion_broadening_ground_truth.npz"
+}
