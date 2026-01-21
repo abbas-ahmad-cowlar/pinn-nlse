@@ -298,3 +298,12 @@
     "bc": 1.0,
     "data": 1.0
   },
+  "n_collocation": 5000,
+  "n_ic": 250,
+  "n_bc": 100,
+  "n_supervised_train": 500,
+  "n_supervised_val": 1000,
+  "adam_time_s": 994.8382320404053,
+  "lbfgs_time_s": 17.39875364303589,
+  "total_time_s": 1012.2370402812958
+}
