@@ -1,0 +1,60 @@
+{
+  "benchmark_mode": "cpu_fair",
+  "benchmark_label": "cpu_fair, PINN device=cpu",
+  "device": "cpu",
+  "case": "soliton",
+  "model_path": "models/published/soliton_data_augmented_final.pt",
+  "model_metadata_profile": "baseline",
+  "model_metadata_data_augmented": true,
+  "dataset_path": "data/soliton_ground_truth.npz",
+  "grid": {
+    "N_tau": 1024,
+    "N_xi": 1001,
+    "N_z": 1000,
+    "xi_max": 5.0,
+    "s": 1.0,
+    "N_sq": 1.0
+  },
+  "n_runs_list": [
+    1,
+    3,
+    10,
+    30
+  ],
+  "benchmark_repeats": 3,
+  "ssfm_median_times": [
+    0.13974459999008104,
+    0.5326707000058377,
+    1.6056892000051448,
+    5.17978239999502
+  ],
+  "pinn_forward_median_times": [
+    1.2042405999964103,
+    4.075311199994758,
+    13.837331999995513,
+    48.04852149999351
+  ],
+  "pinn_end_to_end_median_times": [
+    1.1946683000132907,
+    4.858472699997947,
+    13.674471000005724,
+    48.491225700010546
+  ],
+  "records": [
+    {
+      "n_runs": 1,
+      "ssfm_samples_sec": [
+        0.16707479998876806,
+        0.13974459999008104,
+        0.1374188000045251
+      ],
+      "pinn_forward_samples_sec": [
+        1.2042405999964103,
+        1.2255212000018219,
+        1.1777072999975644
+      ],
+      "pinn_end_to_end_samples_sec": [
+        1.1946683000132907,
+        1.1813091000076383,
+        1.2067966999893542
+      ],
