@@ -1,0 +1,21 @@
+{
+  "case": "soliton_N1",
+  "data_augmented": true,
+  "lambda_data": 1.0,
+  "n_supervised_points": 500,
+  "n_supervised_train": 500,
+  "n_supervised_val": 1000,
+  "supervised_train_seed": 31415,
+  "supervised_val_seed": 92653,
+  "heldout_supervised_mse": 2.3439170035999268e-05,
+  "training_profile": "baseline",
+  "seed": 42,
+  "adam_time_s": 994.8382320404053,
+  "lbfgs_time_s": 17.39875364303589,
+  "total_time_s": 1012.2370402812958,
+  "full_domain_relative_l2": 0.01453558701702627,
+  "pulse_region_relative_l2": 0.01285513677816885,
+  "model_path": "models/soliton_data_augmented_final.pt",
+  "history_path": "logs/soliton_data_augmented_training_history.json",
+  "dataset_path": "data/soliton_ground_truth.npz"
+}
