@@ -128,3 +128,70 @@ dispersion term from the residual. Inputs are scaled to `[−1, +1]` inside the
 network so the physical ranges (`ξ_max = 5`, `τ_max = 20`) do not push the tanh
 units into saturation. Xavier/Glorot initialization is applied to all linear
 layers.
+
+### 2.4 Loss function and training
+
+The total loss is a weighted sum of four terms, evaluated on three (optionally
+four) sets of training points:
+
+$$
+\mathcal{L}
+= \lambda_{\rm phys}\,\overline{r_a^2 + r_b^2}
++ \lambda_{\rm ic}\,\mathrm{MSE}_{\xi=0}
++ \lambda_{\rm bc}\,\mathrm{MSE}_{\tau=\pm \tau_{\max}}
++ \lambda_{\rm data}\,\mathrm{MSE}_{\rm SSFM}.
+$$
+
+Default weights: `λ_phys = 1`, `λ_ic = 10`, `λ_bc = 1`, `λ_data = 0` (pure PINN).
+
+- **Collocation points** (5 000 by default, requires gradients): random `(ξ, τ)`
+  in `[0, 5] × [−20, +20]` sampled with a scrambled Sobol sequence. The physics
+  residual is evaluated here.
+- **IC points** (250 by default): `ξ = 0`, with labels `a₀(τ) = sech(τ)` (or
+  `exp(−τ²/2)` for the Gaussian case) and `b₀ = 0`.
+- **BC points** (100 by default): `τ = ±20`, with zero Dirichlet labels. Valid
+  because the IC pulse decays to `~ 4 × 10⁻⁹` (sech case) at the boundary; the
+  `assert_boundary_decay` check enforces this.
+- **Data points** (optional 500): random selections from the SSFM ground-truth
+  grid restricted to the pulse region (`|τ| ≤ 10`, `|u|² ≥ 10⁻⁴ × peak`),
+  excluding the IC/BC layers. A separate held-out set of 1 000 disjoint indices
+  is reserved for supervised-validation MSE.
+
+**Two-phase optimizer schedule**: 3 000 Adam steps (lr = 1e-3, gradient-clipped
+at `‖∇‖ ≤ 10`) followed by 50 L-BFGS outer calls (`max_iter = 1`, strong-Wolfe
+line search, `history_size = 15`). A **mandatory smoke preflight** runs first
+on a mini network (3 × 64) with 1 000 collocation points and 500 Adam steps —
+this catches sign errors and IC label bugs in <60 s before committing to a 17-
+minute baseline run. The training profile parameters (`5 000 / 3 000 / 50`)
+are a CPU-friendly compromise: a larger `10 000 / 200` schedule is
+reproducible on a GPU but takes ~2 hours per case on this CPU.
+
+The **residual implementation is validated before any training** by feeding
+the analytical soliton (and separately, the analytical linear Gaussian
+dispersion solution) through `PINN_NLSE.physics_residual` as a class attribute
+on a fake module whose `forward` IS the analytical solution. Both cases give
+max residual `≤ 1 × 10⁻⁷` — at the autograd numerical precision floor. This
+test ships as `tests/test_pinn_residual.py` and is part of the `pytest tests/`
+gate.
+
+### 2.5 Pure-PINN failure and data-augmented recovery
+
+The pure PINN (`λ_data = 0`) on the soliton case dropped the total loss four
+orders of magnitude (from 0.6 to 3.4 × 10⁻⁴) over 3 000 Adam steps and reported
+a textbook-looking convergence curve, yet pulse-region rel L2 vs SSFM was
+**41.7 %**. Probing `|u(ξ, τ = 0)|²` along the propagation direction revealed
+the failure: the network had drifted into the trivial NLSE attractor `u → 0`
+(at `ξ = 5`, `|u|²` had decayed from 1.0 at `ξ = 0` to 0.53). With `λ_ic = 10`
+the IC anchor is honored, but in the bulk the residual `R = i ∂_ξ u + (s/2)
+∂²_τ u + N² |u|² u` is satisfied trivially when `u = 0`.
+
+As a recovery strategy, we set `λ_data = 1.0`, added 500 SSFM supervision
+points sampled from the pulse region, and reserved 1 000 disjoint held-out
+indices for supervised validation MSE. All affected artifacts —
+weights, history JSON, metadata JSON, loss-curve figure — are saved with the
+suffix `_data_augmented_*` so the pure and data-augmented runs cannot be
+silently confused. The same fallback was applied to the Gaussian case for
+consistency (without it, pure-PINN rel L2 ≈ 13 %; data-augmented brings it
+under the 10 % threshold).
+
+## 3. Results
