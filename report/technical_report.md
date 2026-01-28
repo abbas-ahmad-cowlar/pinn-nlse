@@ -342,3 +342,83 @@ pulse evolution.
    Neural Operators on the same NLSE test cases.
 5. **Coupled NLSEs** for birefringence and WDM channels in broader fiber-system
    modeling.
+
+### 4.4 Relevance to nonlinear fiber optics
+
+The NLSE is the central reduced model for many nonlinear fiber-optics regimes,
+including soliton propagation, group-velocity dispersion, self-phase
+modulation, pulse compression, and supercontinuum generation. This project
+keeps the classical numerical baseline and the neural surrogate in the same
+normalized convention, which makes the comparison directly inspectable: the
+SSFM verifies the physics on a fixed grid, while the PINN exposes both the
+promise and the failure modes of residual-based training on the same equation.
+
+The most useful extension is not a faster single-case surrogate, because SSFM
+already dominates that regime. The natural next step is a parameter-conditioned
+PINN that learns across `(β₂, γ, N²)` and supports inverse problems or large
+fiber-design sweeps where differentiability and continuous-coordinate queries
+matter.
+
+## 5. Conclusion
+
+We applied the Physics-Informed Neural Network methodology to the normalized
+nonlinear Schrödinger equation and benchmarked it against a Strang-split
+Fourier ground truth. The complex-valued field was decomposed as `u = a + ib`
+and the two real residuals (with the negative sign on `∂_ξ b` in `r_a`
+verified analytically before any training) were minimized via PyTorch
+autograd at 5 000 random collocation points, plus IC, BC, and — when
+required — supervised data terms. The architecture (5 hidden layers × 128
+neurons + tanh, 66 690 trainable parameters) and the Adam → L-BFGS schedule
+were standard; the contribution is the complete, honest end-to-end pipeline.
+
+**Headline outcomes**:
+
+- The N = 1 soliton **data-augmented PINN** achieved a pulse-region
+  relative L2 error of **1.29 %** vs SSFM (held-out supervised MSE
+  = 2.34 × 10⁻⁵ on a disjoint 1 000-label validation set). The Gaussian
+  dispersion-only PINN hit **9.29 %**, both within the target
+  thresholds.
+- The pure (no-data) PINN was attempted first and **failed** the soliton
+  case at 41.7 % rel L2 due to the trivial-solution attractor `u → 0`,
+  diagnosed by probing peak intensity along the propagation direction.
+  The data-augmented recovery (`λ_data = 1.0`, 500 SSFM supervision points
+  plus held-out validation labels) is documented in the artifact filenames,
+  metadata JSONs, notebooks, and this report.
+- The speed benchmark on this 1D CPU showed SSFM running ~8× faster than
+  the trained PINN at fixed-case repeated forward solves (median 0.10 s
+  vs 1.20 s on a 1 001 × 1 024 evaluation grid). We do **not** claim a
+  parameter-sweep speedup — that would require a parameter-conditioned
+  PINN, which is identified as natural future work.
+
+**Reproducibility**: the repository ships frozen `published/` directories for
+weights, logs, and figures; `--run-tag` for isolated retraining; auto-archiving
+before local overwrite; and 68 pytest tests covering numerical helpers, SSFM
+validation, PINN residuals, smoke training, comparison generation, and artifact
+inventory. The natural next step is a parameter-conditioned PINN with
+`(β₂, γ, N²)` as additional inputs, which would justify a real parameter-sweep
+speedup and unlock inverse-problem use cases.
+
+## 6. References
+
+[1] G. P. Agrawal, *Nonlinear Fiber Optics*, 6th ed. (Academic Press, 2019).
+
+[2] M. Raissi, P. Perdikaris, and G. E. Karniadakis,
+"Physics-informed neural networks: A deep learning framework for solving
+forward and inverse problems involving nonlinear partial differential
+equations," *Journal of Computational Physics* 378, 686–707 (2019).
+
+[3] X. Jiang, D. Wang, Q. Fan, M. Zhang, C. Lu, and A. P. T. Lau,
+"Physics-informed Neural Network for Nonlinear Dynamics in Fiber Optics,"
+arXiv:2109.00526 (2021); later published in *Laser & Photonics Reviews*.
+
+[4] J. Pu, J. Li, and Y. Chen, "Solving localized wave solutions of the
+derivative nonlinear Schrödinger equation using an improved PINN method,"
+arXiv:2101.08593 (2021).
+
+[5] T. R. Strang, "On the construction and comparison of difference schemes,"
+*SIAM Journal on Numerical Analysis* 5(3), 506–517 (1968).
+
+---
+
+**Repository**: `pinn-nlse/`
+**Reproduction**: see `README.md` for read-only verification (~30 s), comparison
