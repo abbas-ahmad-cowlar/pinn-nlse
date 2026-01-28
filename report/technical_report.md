@@ -283,3 +283,62 @@ is already very efficient on small 1D grids, and the PINN forward pass over
 speedup — that would require a parameter-conditioned PINN with `(β₂, γ, N²)`
 as inputs, which is beyond this project's scope. Training time is excluded
 from the timings; any PINN speed advantage would only materialize after that
+one-time cost is amortized, and only in regimes where the PINN's continuous
+representation, inverse-problem capability, or differentiable physics
+substitutes for many SSFM solves.
+
+## 4. Discussion
+
+### 4.1 When PINNs help and when they don't
+
+Honest summary of where each method dominates:
+
+| Use case | Better tool | Why |
+|----------|-------------|-----|
+| Single forward simulation (1D, fixed parameters) | SSFM | Faster + machine-precision accuracy |
+| Repeated fixed-case forward solves | SSFM (this 1D regime) | PINN forward over 10⁶ points still loses |
+| Inverse problem (estimate `β₂, γ` from data) | PINN | Same residual loss reused; SSFM has no such tool |
+| Parameter sweep over `(β₂, γ)` | Parameter-conditioned PINN (future work) | Train once, query at any parameter value |
+| Continuous evaluation at arbitrary `(ξ, τ)` | PINN | Differentiable function vs discrete grid |
+| Differentiable physics in a larger ML pipeline | PINN | End-to-end gradient through the PDE |
+
+For nonlinear fiber optics research, the most directly useful extensions are
+(a) parameter-conditioned PINNs for fast `(β₂, γ)` sweeps over fiber design
+space and (b) inverse-problem PINNs for fitting fiber parameters to measured
+pulse evolution.
+
+### 4.2 Limitations and caveats
+
+- **Reported PINNs are data-augmented.** The pure (no-supervision) PINN failed
+  on the soliton case due to the trivial-solution attractor. Both successful
+  PINNs use 500 SSFM points (`λ_data = 1.0`); all artifacts and metadata
+  files state this explicitly. We deliberately preserve the pure-PINN
+  artifacts in `models/`, `logs/`, and `figures/` for the honest comparison.
+- **Training profile is CPU-friendly.** A larger profile with
+  `N_EPOCHS_ADAM = 10 000` and `N_STEPS_LBFGS = 200` at
+  `N_COLLOCATION = 5 000` is supported. We trained at `(3 000, 50, 5 000)` because the
+  full schedule takes ~2 hours per case on this CPU. On a GPU, restoring the
+  full schedule should improve the Gaussian case below the current 9.29 %.
+- **Architecture sensitivity.** A small but real fraction of training runs
+  with different seeds either took longer to converge or got stuck in
+  marginally worse minima. The 5×128 architecture and Xavier init combination
+  was robust; very deep (>8 layers) or very wide (>256 neurons) variants were
+  less reliable on this problem.
+- **The base PINN is not parameter-conditioned**. It is a single-case fixed-
+  physics surrogate. Any parameter-sweep claim requires extending the input
+  to include the physical parameters and training over their range.
+
+### 4.3 Future work (6 months)
+
+1. **Parameter-conditioned PINN** with `(β₂, γ, N²)` as additional inputs.
+   This is the natural extension that would actually justify a
+   parameter-sweep speedup vs SSFM.
+2. **Higher-order solitons** (N = 2, 3) showing breathing dynamics. Use
+   `u₀ = sech_pulse(τ)` and `N_sq = N²` per the imported solver convention
+   (do **not** scale the IC by `N`).
+3. **Inverse problem** demo: estimate `(β₂, γ)` from a noisy `u(z, t)`
+   observation by adding the parameters as trainable variables.
+4. **Method comparison**: like-for-like benchmark against DeepONet and Fourier
+   Neural Operators on the same NLSE test cases.
+5. **Coupled NLSEs** for birefringence and WDM channels in broader fiber-system
+   modeling.
