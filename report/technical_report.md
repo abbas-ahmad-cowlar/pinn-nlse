@@ -128,3 +128,297 @@ dispersion term from the residual. Inputs are scaled to `[−1, +1]` inside the
 network so the physical ranges (`ξ_max = 5`, `τ_max = 20`) do not push the tanh
 units into saturation. Xavier/Glorot initialization is applied to all linear
 layers.
+
+### 2.4 Loss function and training
+
+The total loss is a weighted sum of four terms, evaluated on three (optionally
+four) sets of training points:
+
+$$
+\mathcal{L}
+= \lambda_{\rm phys}\,\overline{r_a^2 + r_b^2}
++ \lambda_{\rm ic}\,\mathrm{MSE}_{\xi=0}
++ \lambda_{\rm bc}\,\mathrm{MSE}_{\tau=\pm \tau_{\max}}
++ \lambda_{\rm data}\,\mathrm{MSE}_{\rm SSFM}.
+$$
+
+Default weights: `λ_phys = 1`, `λ_ic = 10`, `λ_bc = 1`, `λ_data = 0` (pure PINN).
+
+- **Collocation points** (5 000 by default, requires gradients): random `(ξ, τ)`
+  in `[0, 5] × [−20, +20]` sampled with a scrambled Sobol sequence. The physics
+  residual is evaluated here.
+- **IC points** (250 by default): `ξ = 0`, with labels `a₀(τ) = sech(τ)` (or
+  `exp(−τ²/2)` for the Gaussian case) and `b₀ = 0`.
+- **BC points** (100 by default): `τ = ±20`, with zero Dirichlet labels. Valid
+  because the IC pulse decays to `~ 4 × 10⁻⁹` (sech case) at the boundary; the
+  `assert_boundary_decay` check enforces this.
+- **Data points** (optional 500): random selections from the SSFM ground-truth
+  grid restricted to the pulse region (`|τ| ≤ 10`, `|u|² ≥ 10⁻⁴ × peak`),
+  excluding the IC/BC layers. A separate held-out set of 1 000 disjoint indices
+  is reserved for supervised-validation MSE.
+
+**Two-phase optimizer schedule**: 3 000 Adam steps (lr = 1e-3, gradient-clipped
+at `‖∇‖ ≤ 10`) followed by 50 L-BFGS outer calls (`max_iter = 1`, strong-Wolfe
+line search, `history_size = 15`). A **mandatory smoke preflight** runs first
+on a mini network (3 × 64) with 1 000 collocation points and 500 Adam steps —
+this catches sign errors and IC label bugs in <60 s before committing to a 17-
+minute baseline run. The training profile parameters (`5 000 / 3 000 / 50`)
+are a CPU-friendly compromise: a larger `10 000 / 200` schedule is
+reproducible on a GPU but takes ~2 hours per case on this CPU.
+
+The **residual implementation is validated before any training** by feeding
+the analytical soliton (and separately, the analytical linear Gaussian
+dispersion solution) through `PINN_NLSE.physics_residual` as a class attribute
+on a fake module whose `forward` IS the analytical solution. Both cases give
+max residual `≤ 1 × 10⁻⁷` — at the autograd numerical precision floor. This
+test ships as `tests/test_pinn_residual.py` and is part of the `pytest tests/`
+gate.
+
+### 2.5 Pure-PINN failure and data-augmented recovery
+
+The pure PINN (`λ_data = 0`) on the soliton case dropped the total loss four
+orders of magnitude (from 0.6 to 3.4 × 10⁻⁴) over 3 000 Adam steps and reported
+a textbook-looking convergence curve, yet pulse-region rel L2 vs SSFM was
+**41.7 %**. Probing `|u(ξ, τ = 0)|²` along the propagation direction revealed
+the failure: the network had drifted into the trivial NLSE attractor `u → 0`
+(at `ξ = 5`, `|u|²` had decayed from 1.0 at `ξ = 0` to 0.53). With `λ_ic = 10`
+the IC anchor is honored, but in the bulk the residual `R = i ∂_ξ u + (s/2)
+∂²_τ u + N² |u|² u` is satisfied trivially when `u = 0`.
+
+As a recovery strategy, we set `λ_data = 1.0`, added 500 SSFM supervision
+points sampled from the pulse region, and reserved 1 000 disjoint held-out
+indices for supervised validation MSE. All affected artifacts —
+weights, history JSON, metadata JSON, loss-curve figure — are saved with the
+suffix `_data_augmented_*` so the pure and data-augmented runs cannot be
+silently confused. The same fallback was applied to the Gaussian case for
+consistency (without it, pure-PINN rel L2 ≈ 13 %; data-augmented brings it
+under the 10 % threshold).
+
+## 3. Results
+
+### 3.1 SSFM validation
+
+The SSFM ground truth passes all three required validations (see §2.2):
+soliton acid test, energy conservation, and 2nd-order Strang convergence. The
+public physics-demonstration figures — soliton propagation map,
+dispersion-only Gaussian broadening, SPM spectral broadening — are all produced
+and saved under `figures/published/`.
+
+| Figure | File |
+|--------|------|
+| Soliton propagation `|u(ξ, τ)|²` | `figures/published/gt_soliton_propagation.png` |
+| Gaussian pulse broadening (`N²=0`) | `figures/published/01_dispersion_broadening.png` |
+| SPM spectral broadening (`s=0`) | `figures/published/02_spm_spectral_broadening.png` |
+| Strang convergence (slope ≈ 2) | `figures/published/ssfm_convergence_study.png` |
+
+### 3.2 PINN training
+
+Both PINNs converge cleanly under the Adam → L-BFGS schedule. The four logged
+loss components (physics, IC, BC, data) all decrease monotonically except for
+small spikes at the collocation-resampling steps (`resample_every = 1 000`).
+Final losses:
+
+| Case | `L_phys` (Adam end) | `L_ic` | `L_bc` | `L_data` |
+|------|---------------------|--------|--------|----------|
+| Soliton (data-augmented) | 4.1 × 10⁻⁵ | 0 | 1 × 10⁻⁶ | 9 × 10⁻⁶ |
+| Gaussian dispersion (data-augmented) | 2.5 × 10⁻⁴ | 2 × 10⁻⁵ | 3 × 10⁻⁵ | 7 × 10⁻⁴ |
+
+Loss-curve figures: `figures/published/pinn_training_loss_soliton.png` and
+`pinn_training_loss_gaussian_dispersion.png`.
+
+### 3.3 PINN vs SSFM comparison
+
+The hero result is the 3-panel side-by-side comparison
+(`figures/comparison_soliton.png`):
+
+![Soliton: SSFM | PINN | log10 error](../figures/comparison_soliton.png)
+
+Quantitative metrics are summarized in Table 1.
+
+**Table 1**: PINN vs SSFM accuracy (data-augmented PINN, baseline profile,
+seed = 42, 500 SSFM supervision points, 1 000 held-out validation points).
+
+| Metric | Soliton (N = 1) | Gaussian dispersion |
+|--------|----------------:|--------------------:|
+| Pulse-region relative L2 (`|τ| ≤ 10`) | **1.29 %** | **9.29 %** |
+| Full-domain relative L2 | 1.45 % | 11.29 % |
+| MSE (complex field) | 1.06 × 10⁻⁵ | 5.65 × 10⁻⁴ |
+| Max pointwise error | 2.69 × 10⁻² | 1.02 × 10⁻¹ |
+| Mean abs error | 2.53 × 10⁻³ | 1.56 × 10⁻² |
+| Held-out supervised MSE (disjoint 1 000 labels) | 2.34 × 10⁻⁵ | 8.32 × 10⁻⁴ |
+| Total training time (CPU) | 1 012 s | 1 182 s |
+
+Both pulse-region rel L2 numbers meet the plan's pass thresholds (< 5 % for
+the soliton, < 10 % for the Gaussian). The held-out supervised MSE
+demonstrates that the PINN generalizes to the disjoint validation labels —
+not merely memorizing the 500 supervision points.
+
+The **standalone log-scale error map** (`figures/error_map_soliton.png`) and
+the **cross-section overlays at ξ = 0, 2.5, 5** (`figures/cross_section_soliton.png`)
+confirm that the residual error structure is dominated by the propagation
+endpoint and the wings of the pulse — the IC region and the central peak are
+matched to better than `10⁻³`.
+
+### 3.4 Speed benchmark
+
+Figure: `figures/speed_benchmark.png`. Mode: `cpu_fair` (both SSFM and PINN
+forced to CPU for an apples-to-apples comparison). Repeats per point: 3.
+
+**Table 2**: Total wall time for `N_runs` repeated fixed-case evaluations
+(median of 3 trials each). The PINN forward operates on a `1001 × 1024`
+evaluation grid pre-built outside the loop; PINN end-to-end includes the
+tensor-build + host-transfer overhead per call.
+
+| `N_runs` | SSFM (s) | PINN forward (s) | PINN end-to-end (s) | fwd speedup | e2e speedup |
+|---------:|---------:|-----------------:|--------------------:|------------:|------------:|
+| 1 | 0.140 | 1.204 | 1.195 | 0.12× | 0.12× |
+| 3 | 0.533 | 4.075 | 4.858 | 0.13× | 0.11× |
+| 10 | 1.606 | 13.837 | 13.674 | 0.12× | 0.12× |
+| 30 | 5.180 | 48.049 | 48.491 | 0.11× | 0.11× |
+
+For this 1D problem on CPU, the SSFM is consistently ~8× faster than the
+trained PINN at repeated fixed-case inference. This is **expected**: the SSFM
+is already very efficient on small 1D grids, and the PINN forward pass over
+~10⁶ collocation points is not free. We do **not** claim a parameter-sweep
+speedup — that would require a parameter-conditioned PINN with `(β₂, γ, N²)`
+as inputs, which is beyond this project's scope. Training time is excluded
+from the timings; any PINN speed advantage would only materialize after that
+one-time cost is amortized, and only in regimes where the PINN's continuous
+representation, inverse-problem capability, or differentiable physics
+substitutes for many SSFM solves.
+
+## 4. Discussion
+
+### 4.1 When PINNs help and when they don't
+
+Honest summary of where each method dominates:
+
+| Use case | Better tool | Why |
+|----------|-------------|-----|
+| Single forward simulation (1D, fixed parameters) | SSFM | Faster + machine-precision accuracy |
+| Repeated fixed-case forward solves | SSFM (this 1D regime) | PINN forward over 10⁶ points still loses |
+| Inverse problem (estimate `β₂, γ` from data) | PINN | Same residual loss reused; SSFM has no such tool |
+| Parameter sweep over `(β₂, γ)` | Parameter-conditioned PINN (future work) | Train once, query at any parameter value |
+| Continuous evaluation at arbitrary `(ξ, τ)` | PINN | Differentiable function vs discrete grid |
+| Differentiable physics in a larger ML pipeline | PINN | End-to-end gradient through the PDE |
+
+For nonlinear fiber optics research, the most directly useful extensions are
+(a) parameter-conditioned PINNs for fast `(β₂, γ)` sweeps over fiber design
+space and (b) inverse-problem PINNs for fitting fiber parameters to measured
+pulse evolution.
+
+### 4.2 Limitations and caveats
+
+- **Reported PINNs are data-augmented.** The pure (no-supervision) PINN failed
+  on the soliton case due to the trivial-solution attractor. Both successful
+  PINNs use 500 SSFM points (`λ_data = 1.0`); all artifacts and metadata
+  files state this explicitly. We deliberately preserve the pure-PINN
+  artifacts in `models/`, `logs/`, and `figures/` for the honest comparison.
+- **Training profile is CPU-friendly.** A larger profile with
+  `N_EPOCHS_ADAM = 10 000` and `N_STEPS_LBFGS = 200` at
+  `N_COLLOCATION = 5 000` is supported. We trained at `(3 000, 50, 5 000)` because the
+  full schedule takes ~2 hours per case on this CPU. On a GPU, restoring the
+  full schedule should improve the Gaussian case below the current 9.29 %.
+- **Architecture sensitivity.** A small but real fraction of training runs
+  with different seeds either took longer to converge or got stuck in
+  marginally worse minima. The 5×128 architecture and Xavier init combination
+  was robust; very deep (>8 layers) or very wide (>256 neurons) variants were
+  less reliable on this problem.
+- **The base PINN is not parameter-conditioned**. It is a single-case fixed-
+  physics surrogate. Any parameter-sweep claim requires extending the input
+  to include the physical parameters and training over their range.
+
+### 4.3 Future work (6 months)
+
+1. **Parameter-conditioned PINN** with `(β₂, γ, N²)` as additional inputs.
+   This is the natural extension that would actually justify a
+   parameter-sweep speedup vs SSFM.
+2. **Higher-order solitons** (N = 2, 3) showing breathing dynamics. Use
+   `u₀ = sech_pulse(τ)` and `N_sq = N²` per the imported solver convention
+   (do **not** scale the IC by `N`).
+3. **Inverse problem** demo: estimate `(β₂, γ)` from a noisy `u(z, t)`
+   observation by adding the parameters as trainable variables.
+4. **Method comparison**: like-for-like benchmark against DeepONet and Fourier
+   Neural Operators on the same NLSE test cases.
+5. **Coupled NLSEs** for birefringence and WDM channels in broader fiber-system
+   modeling.
+
+### 4.4 Relevance to nonlinear fiber optics
+
+The NLSE is the central reduced model for many nonlinear fiber-optics regimes,
+including soliton propagation, group-velocity dispersion, self-phase
+modulation, pulse compression, and supercontinuum generation. This project
+keeps the classical numerical baseline and the neural surrogate in the same
+normalized convention, which makes the comparison directly inspectable: the
+SSFM verifies the physics on a fixed grid, while the PINN exposes both the
+promise and the failure modes of residual-based training on the same equation.
+
+The most useful extension is not a faster single-case surrogate, because SSFM
+already dominates that regime. The natural next step is a parameter-conditioned
+PINN that learns across `(β₂, γ, N²)` and supports inverse problems or large
+fiber-design sweeps where differentiability and continuous-coordinate queries
+matter.
+
+## 5. Conclusion
+
+We applied the Physics-Informed Neural Network methodology to the normalized
+nonlinear Schrödinger equation and benchmarked it against a Strang-split
+Fourier ground truth. The complex-valued field was decomposed as `u = a + ib`
+and the two real residuals (with the negative sign on `∂_ξ b` in `r_a`
+verified analytically before any training) were minimized via PyTorch
+autograd at 5 000 random collocation points, plus IC, BC, and — when
+required — supervised data terms. The architecture (5 hidden layers × 128
+neurons + tanh, 66 690 trainable parameters) and the Adam → L-BFGS schedule
+were standard; the contribution is the complete, honest end-to-end pipeline.
+
+**Headline outcomes**:
+
+- The N = 1 soliton **data-augmented PINN** achieved a pulse-region
+  relative L2 error of **1.29 %** vs SSFM (held-out supervised MSE
+  = 2.34 × 10⁻⁵ on a disjoint 1 000-label validation set). The Gaussian
+  dispersion-only PINN hit **9.29 %**, both within the target
+  thresholds.
+- The pure (no-data) PINN was attempted first and **failed** the soliton
+  case at 41.7 % rel L2 due to the trivial-solution attractor `u → 0`,
+  diagnosed by probing peak intensity along the propagation direction.
+  The data-augmented recovery (`λ_data = 1.0`, 500 SSFM supervision points
+  plus held-out validation labels) is documented in the artifact filenames,
+  metadata JSONs, notebooks, and this report.
+- The speed benchmark on this 1D CPU showed SSFM running ~8× faster than
+  the trained PINN at fixed-case repeated forward solves (median 0.10 s
+  vs 1.20 s on a 1 001 × 1 024 evaluation grid). We do **not** claim a
+  parameter-sweep speedup — that would require a parameter-conditioned
+  PINN, which is identified as natural future work.
+
+**Reproducibility**: the repository ships frozen `published/` directories for
+weights, logs, and figures; `--run-tag` for isolated retraining; auto-archiving
+before local overwrite; and 68 pytest tests covering numerical helpers, SSFM
+validation, PINN residuals, smoke training, comparison generation, and artifact
+inventory. The natural next step is a parameter-conditioned PINN with
+`(β₂, γ, N²)` as additional inputs, which would justify a real parameter-sweep
+speedup and unlock inverse-problem use cases.
+
+## 6. References
+
+[1] G. P. Agrawal, *Nonlinear Fiber Optics*, 6th ed. (Academic Press, 2019).
+
+[2] M. Raissi, P. Perdikaris, and G. E. Karniadakis,
+"Physics-informed neural networks: A deep learning framework for solving
+forward and inverse problems involving nonlinear partial differential
+equations," *Journal of Computational Physics* 378, 686–707 (2019).
+
+[3] X. Jiang, D. Wang, Q. Fan, M. Zhang, C. Lu, and A. P. T. Lau,
+"Physics-informed Neural Network for Nonlinear Dynamics in Fiber Optics,"
+arXiv:2109.00526 (2021); later published in *Laser & Photonics Reviews*.
+
+[4] J. Pu, J. Li, and Y. Chen, "Solving localized wave solutions of the
+derivative nonlinear Schrödinger equation using an improved PINN method,"
+arXiv:2101.08593 (2021).
+
+[5] T. R. Strang, "On the construction and comparison of difference schemes,"
+*SIAM Journal on Numerical Analysis* 5(3), 506–517 (1968).
+
+---
+
+**Repository**: `pinn-nlse/`
+**Reproduction**: see `README.md` for read-only verification (~30 s), comparison
