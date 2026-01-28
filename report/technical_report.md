@@ -195,3 +195,91 @@ consistency (without it, pure-PINN rel L2 ≈ 13 %; data-augmented brings it
 under the 10 % threshold).
 
 ## 3. Results
+
+### 3.1 SSFM validation
+
+The SSFM ground truth passes all three required validations (see §2.2):
+soliton acid test, energy conservation, and 2nd-order Strang convergence. The
+public physics-demonstration figures — soliton propagation map,
+dispersion-only Gaussian broadening, SPM spectral broadening — are all produced
+and saved under `figures/published/`.
+
+| Figure | File |
+|--------|------|
+| Soliton propagation `|u(ξ, τ)|²` | `figures/published/gt_soliton_propagation.png` |
+| Gaussian pulse broadening (`N²=0`) | `figures/published/01_dispersion_broadening.png` |
+| SPM spectral broadening (`s=0`) | `figures/published/02_spm_spectral_broadening.png` |
+| Strang convergence (slope ≈ 2) | `figures/published/ssfm_convergence_study.png` |
+
+### 3.2 PINN training
+
+Both PINNs converge cleanly under the Adam → L-BFGS schedule. The four logged
+loss components (physics, IC, BC, data) all decrease monotonically except for
+small spikes at the collocation-resampling steps (`resample_every = 1 000`).
+Final losses:
+
+| Case | `L_phys` (Adam end) | `L_ic` | `L_bc` | `L_data` |
+|------|---------------------|--------|--------|----------|
+| Soliton (data-augmented) | 4.1 × 10⁻⁵ | 0 | 1 × 10⁻⁶ | 9 × 10⁻⁶ |
+| Gaussian dispersion (data-augmented) | 2.5 × 10⁻⁴ | 2 × 10⁻⁵ | 3 × 10⁻⁵ | 7 × 10⁻⁴ |
+
+Loss-curve figures: `figures/published/pinn_training_loss_soliton.png` and
+`pinn_training_loss_gaussian_dispersion.png`.
+
+### 3.3 PINN vs SSFM comparison
+
+The hero result is the 3-panel side-by-side comparison
+(`figures/comparison_soliton.png`):
+
+![Soliton: SSFM | PINN | log10 error](../figures/comparison_soliton.png)
+
+Quantitative metrics are summarized in Table 1.
+
+**Table 1**: PINN vs SSFM accuracy (data-augmented PINN, baseline profile,
+seed = 42, 500 SSFM supervision points, 1 000 held-out validation points).
+
+| Metric | Soliton (N = 1) | Gaussian dispersion |
+|--------|----------------:|--------------------:|
+| Pulse-region relative L2 (`|τ| ≤ 10`) | **1.29 %** | **9.29 %** |
+| Full-domain relative L2 | 1.45 % | 11.29 % |
+| MSE (complex field) | 1.06 × 10⁻⁵ | 5.65 × 10⁻⁴ |
+| Max pointwise error | 2.69 × 10⁻² | 1.02 × 10⁻¹ |
+| Mean abs error | 2.53 × 10⁻³ | 1.56 × 10⁻² |
+| Held-out supervised MSE (disjoint 1 000 labels) | 2.34 × 10⁻⁵ | 8.32 × 10⁻⁴ |
+| Total training time (CPU) | 1 012 s | 1 182 s |
+
+Both pulse-region rel L2 numbers meet the plan's pass thresholds (< 5 % for
+the soliton, < 10 % for the Gaussian). The held-out supervised MSE
+demonstrates that the PINN generalizes to the disjoint validation labels —
+not merely memorizing the 500 supervision points.
+
+The **standalone log-scale error map** (`figures/error_map_soliton.png`) and
+the **cross-section overlays at ξ = 0, 2.5, 5** (`figures/cross_section_soliton.png`)
+confirm that the residual error structure is dominated by the propagation
+endpoint and the wings of the pulse — the IC region and the central peak are
+matched to better than `10⁻³`.
+
+### 3.4 Speed benchmark
+
+Figure: `figures/speed_benchmark.png`. Mode: `cpu_fair` (both SSFM and PINN
+forced to CPU for an apples-to-apples comparison). Repeats per point: 3.
+
+**Table 2**: Total wall time for `N_runs` repeated fixed-case evaluations
+(median of 3 trials each). The PINN forward operates on a `1001 × 1024`
+evaluation grid pre-built outside the loop; PINN end-to-end includes the
+tensor-build + host-transfer overhead per call.
+
+| `N_runs` | SSFM (s) | PINN forward (s) | PINN end-to-end (s) | fwd speedup | e2e speedup |
+|---------:|---------:|-----------------:|--------------------:|------------:|------------:|
+| 1 | 0.140 | 1.204 | 1.195 | 0.12× | 0.12× |
+| 3 | 0.533 | 4.075 | 4.858 | 0.13× | 0.11× |
+| 10 | 1.606 | 13.837 | 13.674 | 0.12× | 0.12× |
+| 30 | 5.180 | 48.049 | 48.491 | 0.11× | 0.11× |
+
+For this 1D problem on CPU, the SSFM is consistently ~8× faster than the
+trained PINN at repeated fixed-case inference. This is **expected**: the SSFM
+is already very efficient on small 1D grids, and the PINN forward pass over
+~10⁶ collocation points is not free. We do **not** claim a parameter-sweep
+speedup — that would require a parameter-conditioned PINN with `(β₂, γ, N²)`
+as inputs, which is beyond this project's scope. Training time is excluded
+from the timings; any PINN speed advantage would only materialize after that
