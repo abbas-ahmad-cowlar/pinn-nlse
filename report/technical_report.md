@@ -422,3 +422,4 @@ arXiv:2101.08593 (2021).
 
 **Repository**: `pinn-nlse/`
 **Reproduction**: see `README.md` for read-only verification (~30 s), comparison
+regeneration, and full retrain instructions (~35 min per case on CPU).
