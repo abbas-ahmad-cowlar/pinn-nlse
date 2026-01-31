@@ -67,3 +67,79 @@ function Get-RelativeGitPath {
     $relative = $full.Substring($base.Length).TrimStart("\", "/")
     return ConvertTo-GitPath $relative
 }
+
+function Invoke-Git {
+    param(
+        [string[]] $Arguments,
+        [switch] $AllowFailure
+    )
+    Push-Location $script:RepoRoot
+    try {
+        & git @Arguments
+        $exitCode = $LASTEXITCODE
+        if (-not $AllowFailure -and $exitCode -ne 0) {
+            throw "git $($Arguments -join ' ') failed with exit code $exitCode"
+        }
+        return $exitCode
+    }
+    finally {
+        Pop-Location
+    }
+}
+
+function Invoke-GitOutput {
+    param([string[]] $Arguments)
+    Push-Location $script:RepoRoot
+    try {
+        $output = & git @Arguments 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            return @()
+        }
+        return @($output)
+    }
+    finally {
+        Pop-Location
+    }
+}
+
+function Invoke-DatedGit {
+    param(
+        [string[]] $Arguments,
+        [datetime] $When
+    )
+    $dateText = $When.ToString("yyyy-MM-dd HH:mm:ss") + " " + $TimezoneOffset
+    $oldAuthor = $env:GIT_AUTHOR_DATE
+    $oldCommitter = $env:GIT_COMMITTER_DATE
+    $env:GIT_AUTHOR_DATE = $dateText
+    $env:GIT_COMMITTER_DATE = $dateText
+    try {
+        Invoke-Git -Arguments $Arguments | Out-Null
+    }
+    finally {
+        if ($null -eq $oldAuthor) {
+            Remove-Item Env:\GIT_AUTHOR_DATE -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:GIT_AUTHOR_DATE = $oldAuthor
+        }
+        if ($null -eq $oldCommitter) {
+            Remove-Item Env:\GIT_COMMITTER_DATE -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:GIT_COMMITTER_DATE = $oldCommitter
+        }
+    }
+}
+
+function Test-ExcludedPath {
+    param([string] $RelativePath)
+    $p = ConvertTo-GitPath $RelativePath
+    $parts = @($p -split "/")
+    $excludedDirs = @(
+        ".git", ".venv", "venv", "env", ".pytest_cache", "__pycache__",
+        ".private_archive", "pinn_nlse.egg-info", "dist", "build",
+        ".ipynb_checkpoints"
+    )
+    foreach ($part in $parts) {
+        if ($excludedDirs -contains $part) {
+            return $true
