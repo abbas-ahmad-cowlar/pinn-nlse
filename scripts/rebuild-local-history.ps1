@@ -143,3 +143,74 @@ function Test-ExcludedPath {
     foreach ($part in $parts) {
         if ($excludedDirs -contains $part) {
             return $true
+        }
+    }
+    $name = [System.IO.Path]::GetFileName($p)
+    if ($name -like "*.pyc") { return $true }
+    if ($name -like "*.pyo") { return $true }
+    if ($name -like "*.archived-*") { return $true }
+    if ($name -like "jupyterlab_*.log") { return $true }
+    if ($name -eq "Desktop.ini" -or $name -eq "Thumbs.db" -or $name -eq ".DS_Store") { return $true }
+    return $false
+}
+
+function Get-CandidateFiles {
+    $files = @()
+    if (Test-Path -LiteralPath (Join-Path $script:RepoRoot ".git")) {
+        $gitFiles = @(Invoke-GitOutput -Arguments @("ls-files", "--cached", "--others", "--exclude-standard"))
+        if ($gitFiles.Count -gt 0) {
+            $files = $gitFiles | ForEach-Object { ConvertTo-GitPath $_ }
+        }
+    }
+
+    if ($files.Count -eq 0) {
+        $files = Get-ChildItem -LiteralPath $script:RepoRoot -Recurse -File |
+            ForEach-Object { Get-RelativeGitPath $_.FullName } |
+            Where-Object { -not (Test-ExcludedPath $_) }
+    }
+
+    $files |
+        Where-Object { $_ -and -not (Test-ExcludedPath $_) } |
+        Sort-Object -Unique
+}
+
+function Get-FileOrder {
+    param([string] $RelativePath)
+    $p = ConvertTo-GitPath $RelativePath
+    if ($p -eq ".gitignore") { return 0 }
+    if ($p -eq "LICENSE") { return 1 }
+    if ($p -eq "requirements.txt" -or $p -eq "pyproject.toml") { return 2 }
+    if ($p -eq "README.md") { return 3 }
+    if ($p -like "src/config.py") { return 10 }
+    if ($p -like "src/nlse_utils.py" -or $p -like "src/ssfm.py") { return 11 }
+    if ($p -like "src/utils.py") { return 12 }
+    if ($p -like "src/data_gen.py") { return 13 }
+    if ($p -like "src/pinn_nlse.py") { return 14 }
+    if ($p -like "src/train.py") { return 15 }
+    if ($p -like "src/generate_ground_truth.py") { return 16 }
+    if ($p -like "src/compare.py") { return 17 }
+    if ($p -like "src/benchmark.py") { return 18 }
+    if ($p -like "src/*") { return 19 }
+    if ($p -like "tests/*") { return 30 }
+    if ($p -like "notebooks/*") { return 40 }
+    if ($p -like "data/*") { return 50 }
+    if ($p -like "figures/*") { return 60 }
+    if ($p -like "logs/*") { return 70 }
+    if ($p -like "models/*") { return 80 }
+    if ($p -like "report/*") { return 90 }
+    if ($p -like "scripts/*") { return 95 }
+    return 99
+}
+
+function Get-FileKind {
+    param([string] $RelativePath)
+    $p = ConvertTo-GitPath $RelativePath
+    $name = [System.IO.Path]::GetFileName($p)
+    $ext = [System.IO.Path]::GetExtension($p).ToLowerInvariant()
+    if ($ext -eq ".ipynb") { return "notebook" }
+    if ($name -eq ".gitignore" -or $name -eq ".gitkeep") { return "text" }
+    if (@(".py", ".ps1", ".md", ".toml", ".txt", ".json", ".cfg", ".csv") -contains $ext) {
+        return "text"
+    }
+    return "whole-file"
+}
