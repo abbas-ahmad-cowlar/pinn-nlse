@@ -214,3 +214,97 @@ function Get-FileKind {
     }
     return "whole-file"
 }
+
+function Get-ChunkLabel {
+    param(
+        [string] $RelativePath,
+        [string[]] $Lines,
+        [int] $Index
+    )
+    $p = ConvertTo-GitPath $RelativePath
+    $stem = [System.IO.Path]::GetFileNameWithoutExtension($p)
+    $first = ($Lines | Where-Object { $_.Trim().Length -gt 0 } | Select-Object -First 1)
+    if ($null -eq $first) {
+        return "Add $p"
+    }
+    $trimmed = $first.Trim()
+    if ($trimmed -match "^(def|class)\s+([A-Za-z_][A-Za-z0-9_]*)") {
+        return "Add $stem $($matches[2])"
+    }
+    if ($trimmed -match "^#+\s+(.+)$") {
+        $heading = $matches[1]
+        if ($heading.Length -gt 44) { $heading = $heading.Substring(0, 44).Trim() }
+        return "Document $heading"
+    }
+    if ($trimmed -match "^from\s+|^import\s+") {
+        return "Add $stem imports"
+    }
+    if ($trimmed -match "^\[") {
+        return "Add $stem configuration"
+    }
+    if ($trimmed.Length -gt 44) {
+        $trimmed = $trimmed.Substring(0, 44).Trim()
+    }
+    return "Update $stem chunk $Index"
+}
+
+function New-TextChunks {
+    param(
+        [string] $RelativePath,
+        [string] $SourcePath,
+        [int] $MaxLinesPerChunk
+    )
+    $lines = [System.IO.File]::ReadAllLines($SourcePath)
+    $chunks = New-Object "System.Collections.Generic.List[object]"
+    if ($lines.Count -eq 0) {
+        $chunks.Add([pscustomobject] @{
+            Path = $RelativePath
+            Kind = "text"
+            Lines = @()
+            Label = "Add empty $RelativePath"
+            Order = Get-FileOrder $RelativePath
+            ChunkIndex = 1
+        })
+        return $chunks.ToArray()
+    }
+
+    $ext = [System.IO.Path]::GetExtension($RelativePath).ToLowerInvariant()
+    $breaks = New-Object "System.Collections.Generic.List[int]"
+    $breaks.Add(0)
+    $lastBreak = 0
+    for ($i = 1; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        $isBoundary = $false
+        if ($ext -eq ".py") {
+            if ($line -match "^(def|class)\s+" -or $line -match "^#\s*-{5,}") {
+                $isBoundary = $true
+            }
+        }
+        elseif ($ext -eq ".md") {
+            if ($line -match "^#{1,3}\s+") {
+                $isBoundary = $true
+            }
+        }
+        elseif ($ext -eq ".ps1") {
+            if ($line -match "^function\s+[A-Za-z0-9_-]+") {
+                $isBoundary = $true
+            }
+        }
+
+        if (($i - $lastBreak) -ge $MaxLinesPerChunk) {
+            $isBoundary = $true
+        }
+        if ($isBoundary -and $i -gt $lastBreak) {
+            $breaks.Add($i)
+            $lastBreak = $i
+        }
+    }
+    $breaks.Add($lines.Count)
+
+    $chunkIndex = 1
+    for ($b = 0; $b -lt ($breaks.Count - 1); $b++) {
+        $start = $breaks[$b]
+        $endExclusive = $breaks[$b + 1]
+        if ($endExclusive -le $start) { continue }
+        $segment = @()
+        for ($j = $start; $j -lt $endExclusive; $j++) {
