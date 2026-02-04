@@ -308,3 +308,92 @@ function New-TextChunks {
         if ($endExclusive -le $start) { continue }
         $segment = @()
         for ($j = $start; $j -lt $endExclusive; $j++) {
+            $segment += $lines[$j]
+        }
+        $chunks.Add([pscustomobject] @{
+            Path = $RelativePath
+            Kind = "text"
+            Lines = $segment
+            Label = Get-ChunkLabel -RelativePath $RelativePath -Lines $segment -Index $chunkIndex
+            Order = Get-FileOrder $RelativePath
+            ChunkIndex = $chunkIndex
+        })
+        $chunkIndex++
+    }
+    return $chunks.ToArray()
+}
+
+function New-NotebookChunks {
+    param(
+        [string] $RelativePath,
+        [string] $SourcePath
+    )
+    $raw = Get-Content -LiteralPath $SourcePath -Raw
+    $notebook = $raw | ConvertFrom-Json
+    $cells = @($notebook.cells)
+    $chunks = New-Object "System.Collections.Generic.List[object]"
+    if ($cells.Count -eq 0) {
+        $chunks.Add([pscustomobject] @{
+            Path = $RelativePath
+            Kind = "whole-file"
+            Label = "Add empty notebook $RelativePath"
+            Order = Get-FileOrder $RelativePath
+            ChunkIndex = 1
+        })
+        return $chunks.ToArray()
+    }
+    for ($i = 0; $i -lt $cells.Count; $i++) {
+        $displayIndex = $i + 1
+        $stem = [System.IO.Path]::GetFileNameWithoutExtension($RelativePath)
+        $chunks.Add([pscustomobject] @{
+            Path = $RelativePath
+            Kind = "notebook-cell"
+            Cell = $cells[$i]
+            Template = $notebook
+            Label = "Add $stem notebook cell $displayIndex"
+            Order = Get-FileOrder $RelativePath
+            ChunkIndex = $displayIndex
+        })
+    }
+    return $chunks.ToArray()
+}
+
+function New-WholeFileChunk {
+    param([string] $RelativePath)
+    $name = [System.IO.Path]::GetFileNameWithoutExtension($RelativePath)
+    return [pscustomobject] @{
+        Path = $RelativePath
+        Kind = "whole-file"
+        Label = "Add $name artifact"
+        Order = Get-FileOrder $RelativePath
+        ChunkIndex = 1
+    }
+}
+
+function New-ReconstructionChunks {
+    param(
+        [string[]] $Files,
+        [string] $BackupRoot,
+        [int] $MaxLinesPerChunk
+    )
+    $chunks = New-Object "System.Collections.Generic.List[object]"
+    foreach ($file in $Files) {
+        $sourcePath = Join-Path $BackupRoot ($file -replace "/", [System.IO.Path]::DirectorySeparatorChar)
+        $kind = Get-FileKind $file
+        if ($kind -eq "text") {
+            foreach ($chunk in (New-TextChunks -RelativePath $file -SourcePath $sourcePath -MaxLinesPerChunk $MaxLinesPerChunk)) {
+                $chunks.Add($chunk)
+            }
+        }
+        elseif ($kind -eq "notebook") {
+            foreach ($chunk in (New-NotebookChunks -RelativePath $file -SourcePath $sourcePath)) {
+                $chunks.Add($chunk)
+            }
+        }
+        else {
+            $chunks.Add((New-WholeFileChunk -RelativePath $file))
+        }
+    }
+
+    return @($chunks | Sort-Object @{ Expression = "Order"; Ascending = $true }, Path, ChunkIndex)
+}
