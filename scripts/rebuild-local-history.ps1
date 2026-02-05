@@ -483,3 +483,85 @@ function Get-BranchTopic {
     if ($p -like "scripts/*") { return "history-tooling" }
     return "project-files"
 }
+
+function Get-SafeBranchName {
+    param(
+        [int] $Index,
+        [string] $Topic
+    )
+    $slug = ($Topic.ToLowerInvariant() -replace "[^a-z0-9]+", "-").Trim("-")
+    return ("feature/{0:D3}-{1}" -f $Index, $slug)
+}
+
+function Get-CommitMessage {
+    param([object] $Chunk)
+    $label = [string] $Chunk.Label
+    if ($label.Length -gt 70) {
+        $label = $label.Substring(0, 70).Trim()
+    }
+    return $label
+}
+
+function Get-PlannedUnitCount {
+    param(
+        [int] $MinimumTotalCommits,
+        [int] $CommitsPerFeatureBranch
+    )
+    for ($n = 1; $n -lt 10000; $n++) {
+        $branchUnits = [Math]::Max(0, $n - 2)
+        $mergeCount = [int] [Math]::Ceiling($branchUnits / [double] $CommitsPerFeatureBranch)
+        $total = $n + $mergeCount
+        if ($total -ge $MinimumTotalCommits) {
+            return $n
+        }
+    }
+    throw "Unable to calculate a commit unit count."
+}
+
+function Get-CommitUnitLabel {
+    param([object[]] $Group)
+    if ($Group.Count -eq 1) {
+        return [string] $Group[0].Label
+    }
+    $firstPath = [string] $Group[0].Path
+    $samePath = $true
+    foreach ($chunk in $Group) {
+        if ([string] $chunk.Path -ne $firstPath) {
+            $samePath = $false
+            break
+        }
+    }
+    if ($samePath) {
+        $stem = [System.IO.Path]::GetFileNameWithoutExtension($firstPath)
+        if ([string]::IsNullOrWhiteSpace($stem)) {
+            $stem = [System.IO.Path]::GetFileName($firstPath)
+        }
+        return "Expand $stem"
+    }
+    return "Build $(Get-BranchTopic $firstPath)"
+}
+
+function New-CommitUnits {
+    param(
+        [object[]] $Chunks,
+        [int] $DesiredUnitCount
+    )
+    if ($DesiredUnitCount -ge $Chunks.Count) {
+        $units = New-Object "System.Collections.Generic.List[object]"
+        $idx = 1
+        foreach ($chunk in $Chunks) {
+            $units.Add([pscustomobject] @{
+                Chunks = @($chunk)
+                Path = [string] $chunk.Path
+                Label = [string] $chunk.Label
+                UnitIndex = $idx
+            })
+            $idx++
+        }
+        return $units.ToArray()
+    }
+
+    $packed = New-Object "System.Collections.Generic.List[object]"
+    $totalChunks = $Chunks.Count
+    for ($i = 0; $i -lt $DesiredUnitCount; $i++) {
+        $start = [int] [Math]::Floor($i * $totalChunks / [double] $DesiredUnitCount)
