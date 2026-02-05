@@ -397,3 +397,89 @@ function New-ReconstructionChunks {
 
     return @($chunks | Sort-Object @{ Expression = "Order"; Ascending = $true }, Path, ChunkIndex)
 }
+
+function New-WorkDays {
+    param(
+        [datetime] $Start,
+        [datetime] $End,
+        [int] $RandomSeed
+    )
+    $rng = New-Object System.Random $RandomSeed
+    $selected = @{}
+    $cursor = $Start.Date
+    while ($cursor -le $End.Date) {
+        $week = @()
+        for ($i = 0; $i -lt 7; $i++) {
+            $d = $cursor.AddDays($i)
+            if ($d -ge $Start.Date -and $d -le $End.Date) {
+                $week += $d
+            }
+        }
+        $take = [Math]::Min(4, $week.Count)
+        $picked = $week | Sort-Object { $rng.Next() } | Select-Object -First $take
+        foreach ($d in $picked) {
+            $selected[$d.ToString("yyyy-MM-dd")] = $d
+        }
+        $cursor = $cursor.AddDays(7)
+    }
+    $selected[$Start.Date.ToString("yyyy-MM-dd")] = $Start.Date
+    $selected[$End.Date.ToString("yyyy-MM-dd")] = $End.Date
+    return @($selected.Values | Sort-Object)
+}
+
+function New-CommitDates {
+    param(
+        [int] $Count,
+        [datetime] $Start,
+        [datetime] $End,
+        [int] $RandomSeed
+    )
+    if ($Count -le 0) { return @() }
+    if ($Count -eq 1) { return @($End) }
+
+    $rng = New-Object System.Random ($RandomSeed + 17)
+    $workDays = New-WorkDays -Start $Start -End $End -RandomSeed $RandomSeed
+    $dates = New-Object "System.Collections.Generic.List[datetime]"
+    while ($dates.Count -lt $Count) {
+        foreach ($day in $workDays) {
+            $commitsToday = 1 + $rng.Next(0, 4)
+            for ($i = 0; $i -lt $commitsToday; $i++) {
+                if ($dates.Count -ge $Count) { break }
+                $hour = 9 + $rng.Next(0, 13)
+                $minute = $rng.Next(0, 60)
+                $second = $rng.Next(0, 60)
+                $candidate = $day.AddHours($hour).AddMinutes($minute).AddSeconds($second)
+                if ($candidate -ge $Start -and $candidate -le $End) {
+                    $dates.Add($candidate)
+                }
+            }
+            if ($dates.Count -ge $Count) { break }
+        }
+    }
+    $sorted = @($dates | Sort-Object | Select-Object -First $Count)
+    $sorted[0] = $Start
+    $sorted[$sorted.Count - 1] = $End
+    return @($sorted)
+}
+
+function Get-BranchTopic {
+    param([string] $RelativePath)
+    $p = ConvertTo-GitPath $RelativePath
+    if ($p -like "src/config.py") { return "configuration" }
+    if ($p -like "src/ssfm.py" -or $p -like "src/nlse_utils.py") { return "ssfm-solver" }
+    if ($p -like "src/data_gen.py") { return "training-data" }
+    if ($p -like "src/pinn_nlse.py") { return "pinn-model" }
+    if ($p -like "src/train.py") { return "training-loop" }
+    if ($p -like "src/compare.py") { return "comparison-cli" }
+    if ($p -like "src/benchmark.py") { return "benchmarking" }
+    if ($p -like "src/*") { return "source-modules" }
+    if ($p -like "tests/*") { return "tests" }
+    if ($p -like "notebooks/*") { return "notebooks" }
+    if ($p -like "data/*") { return "ground-truth-data" }
+    if ($p -like "figures/*") { return "figures" }
+    if ($p -like "logs/*") { return "training-logs" }
+    if ($p -like "models/*") { return "model-weights" }
+    if ($p -like "report/*" -or $p -eq "README.md") { return "documentation" }
+    if ($p -like "scripts/*") { return "history-tooling" }
+    return "project-files"
+}
