@@ -565,3 +565,82 @@ function New-CommitUnits {
     $totalChunks = $Chunks.Count
     for ($i = 0; $i -lt $DesiredUnitCount; $i++) {
         $start = [int] [Math]::Floor($i * $totalChunks / [double] $DesiredUnitCount)
+        $endExclusive = [int] [Math]::Floor(($i + 1) * $totalChunks / [double] $DesiredUnitCount)
+        if ($endExclusive -le $start) { $endExclusive = $start + 1 }
+        $group = @()
+        for ($j = $start; $j -lt $endExclusive; $j++) {
+            $group += $Chunks[$j]
+        }
+        $packed.Add([pscustomobject] @{
+            Chunks = $group
+            Path = [string] $group[0].Path
+            Label = Get-CommitUnitLabel -Group $group
+            UnitIndex = $i + 1
+        })
+    }
+    return $packed.ToArray()
+}
+
+function Copy-SnapshotFile {
+    param(
+        [string] $BackupRoot,
+        [string] $RelativePath
+    )
+    $source = Join-Path $BackupRoot ($RelativePath -replace "/", [System.IO.Path]::DirectorySeparatorChar)
+    $target = Join-RepoPath $RelativePath
+    $targetDir = Split-Path -Parent $target
+    if ($targetDir -and -not (Test-Path -LiteralPath $targetDir)) {
+        New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+    }
+    Copy-Item -LiteralPath $source -Destination $target -Force
+}
+
+function Write-TextBuffer {
+    param(
+        [string] $RelativePath,
+        [string[]] $Lines
+    )
+    $target = Join-RepoPath $RelativePath
+    $targetDir = Split-Path -Parent $target
+    if ($targetDir -and -not (Test-Path -LiteralPath $targetDir)) {
+        New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+    }
+    $text = [string]::Join([Environment]::NewLine, $Lines)
+    [System.IO.File]::WriteAllText($target, $text, $script:Utf8NoBom)
+}
+
+function Apply-Chunk {
+    param(
+        [object] $Chunk,
+        [string] $BackupRoot,
+        [hashtable] $State
+    )
+    $path = [string] $Chunk.Path
+    if ($Chunk.Kind -eq "text") {
+        if (-not $State.TextBuffers.ContainsKey($path)) {
+            $State.TextBuffers[$path] = New-Object "System.Collections.Generic.List[string]"
+        }
+        foreach ($line in @($Chunk.Lines)) {
+            $State.TextBuffers[$path].Add([string] $line)
+        }
+        Write-TextBuffer -RelativePath $path -Lines $State.TextBuffers[$path].ToArray()
+    }
+    elseif ($Chunk.Kind -eq "notebook-cell") {
+        if (-not $State.NotebookCells.ContainsKey($path)) {
+            $State.NotebookCells[$path] = New-Object "System.Collections.Generic.List[object]"
+        }
+        $State.NotebookCells[$path].Add($Chunk.Cell)
+        $target = Join-RepoPath $path
+        $targetDir = Split-Path -Parent $target
+        if ($targetDir -and -not (Test-Path -LiteralPath $targetDir)) {
+            New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+        }
+        $notebook = $Chunk.Template | ConvertTo-Json -Depth 100 | ConvertFrom-Json
+        $notebook.cells = $State.NotebookCells[$path].ToArray()
+        $json = $notebook | ConvertTo-Json -Depth 100
+        [System.IO.File]::WriteAllText($target, $json + [Environment]::NewLine, $script:Utf8NoBom)
+    }
+    else {
+        Copy-SnapshotFile -BackupRoot $BackupRoot -RelativePath $path
+    }
+}
