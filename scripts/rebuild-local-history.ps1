@@ -308,3 +308,339 @@ function New-TextChunks {
         if ($endExclusive -le $start) { continue }
         $segment = @()
         for ($j = $start; $j -lt $endExclusive; $j++) {
+            $segment += $lines[$j]
+        }
+        $chunks.Add([pscustomobject] @{
+            Path = $RelativePath
+            Kind = "text"
+            Lines = $segment
+            Label = Get-ChunkLabel -RelativePath $RelativePath -Lines $segment -Index $chunkIndex
+            Order = Get-FileOrder $RelativePath
+            ChunkIndex = $chunkIndex
+        })
+        $chunkIndex++
+    }
+    return $chunks.ToArray()
+}
+
+function New-NotebookChunks {
+    param(
+        [string] $RelativePath,
+        [string] $SourcePath
+    )
+    $raw = Get-Content -LiteralPath $SourcePath -Raw
+    $notebook = $raw | ConvertFrom-Json
+    $cells = @($notebook.cells)
+    $chunks = New-Object "System.Collections.Generic.List[object]"
+    if ($cells.Count -eq 0) {
+        $chunks.Add([pscustomobject] @{
+            Path = $RelativePath
+            Kind = "whole-file"
+            Label = "Add empty notebook $RelativePath"
+            Order = Get-FileOrder $RelativePath
+            ChunkIndex = 1
+        })
+        return $chunks.ToArray()
+    }
+    for ($i = 0; $i -lt $cells.Count; $i++) {
+        $displayIndex = $i + 1
+        $stem = [System.IO.Path]::GetFileNameWithoutExtension($RelativePath)
+        $chunks.Add([pscustomobject] @{
+            Path = $RelativePath
+            Kind = "notebook-cell"
+            Cell = $cells[$i]
+            Template = $notebook
+            Label = "Add $stem notebook cell $displayIndex"
+            Order = Get-FileOrder $RelativePath
+            ChunkIndex = $displayIndex
+        })
+    }
+    return $chunks.ToArray()
+}
+
+function New-WholeFileChunk {
+    param([string] $RelativePath)
+    $name = [System.IO.Path]::GetFileNameWithoutExtension($RelativePath)
+    return [pscustomobject] @{
+        Path = $RelativePath
+        Kind = "whole-file"
+        Label = "Add $name artifact"
+        Order = Get-FileOrder $RelativePath
+        ChunkIndex = 1
+    }
+}
+
+function New-ReconstructionChunks {
+    param(
+        [string[]] $Files,
+        [string] $BackupRoot,
+        [int] $MaxLinesPerChunk
+    )
+    $chunks = New-Object "System.Collections.Generic.List[object]"
+    foreach ($file in $Files) {
+        $sourcePath = Join-Path $BackupRoot ($file -replace "/", [System.IO.Path]::DirectorySeparatorChar)
+        $kind = Get-FileKind $file
+        if ($kind -eq "text") {
+            foreach ($chunk in (New-TextChunks -RelativePath $file -SourcePath $sourcePath -MaxLinesPerChunk $MaxLinesPerChunk)) {
+                $chunks.Add($chunk)
+            }
+        }
+        elseif ($kind -eq "notebook") {
+            foreach ($chunk in (New-NotebookChunks -RelativePath $file -SourcePath $sourcePath)) {
+                $chunks.Add($chunk)
+            }
+        }
+        else {
+            $chunks.Add((New-WholeFileChunk -RelativePath $file))
+        }
+    }
+
+    return @($chunks | Sort-Object @{ Expression = "Order"; Ascending = $true }, Path, ChunkIndex)
+}
+
+function New-WorkDays {
+    param(
+        [datetime] $Start,
+        [datetime] $End,
+        [int] $RandomSeed
+    )
+    $rng = New-Object System.Random $RandomSeed
+    $selected = @{}
+    $cursor = $Start.Date
+    while ($cursor -le $End.Date) {
+        $week = @()
+        for ($i = 0; $i -lt 7; $i++) {
+            $d = $cursor.AddDays($i)
+            if ($d -ge $Start.Date -and $d -le $End.Date) {
+                $week += $d
+            }
+        }
+        $take = [Math]::Min(4, $week.Count)
+        $picked = $week | Sort-Object { $rng.Next() } | Select-Object -First $take
+        foreach ($d in $picked) {
+            $selected[$d.ToString("yyyy-MM-dd")] = $d
+        }
+        $cursor = $cursor.AddDays(7)
+    }
+    $selected[$Start.Date.ToString("yyyy-MM-dd")] = $Start.Date
+    $selected[$End.Date.ToString("yyyy-MM-dd")] = $End.Date
+    return @($selected.Values | Sort-Object)
+}
+
+function New-CommitDates {
+    param(
+        [int] $Count,
+        [datetime] $Start,
+        [datetime] $End,
+        [int] $RandomSeed
+    )
+    if ($Count -le 0) { return @() }
+    if ($Count -eq 1) { return @($End) }
+
+    $rng = New-Object System.Random ($RandomSeed + 17)
+    $workDays = New-WorkDays -Start $Start -End $End -RandomSeed $RandomSeed
+    $dates = New-Object "System.Collections.Generic.List[datetime]"
+    while ($dates.Count -lt $Count) {
+        foreach ($day in $workDays) {
+            $commitsToday = 1 + $rng.Next(0, 4)
+            for ($i = 0; $i -lt $commitsToday; $i++) {
+                if ($dates.Count -ge $Count) { break }
+                $hour = 9 + $rng.Next(0, 13)
+                $minute = $rng.Next(0, 60)
+                $second = $rng.Next(0, 60)
+                $candidate = $day.AddHours($hour).AddMinutes($minute).AddSeconds($second)
+                if ($candidate -ge $Start -and $candidate -le $End) {
+                    $dates.Add($candidate)
+                }
+            }
+            if ($dates.Count -ge $Count) { break }
+        }
+    }
+    $sorted = @($dates | Sort-Object | Select-Object -First $Count)
+    $sorted[0] = $Start
+    $sorted[$sorted.Count - 1] = $End
+    return @($sorted)
+}
+
+function Get-BranchTopic {
+    param([string] $RelativePath)
+    $p = ConvertTo-GitPath $RelativePath
+    if ($p -like "src/config.py") { return "configuration" }
+    if ($p -like "src/ssfm.py" -or $p -like "src/nlse_utils.py") { return "ssfm-solver" }
+    if ($p -like "src/data_gen.py") { return "training-data" }
+    if ($p -like "src/pinn_nlse.py") { return "pinn-model" }
+    if ($p -like "src/train.py") { return "training-loop" }
+    if ($p -like "src/compare.py") { return "comparison-cli" }
+    if ($p -like "src/benchmark.py") { return "benchmarking" }
+    if ($p -like "src/*") { return "source-modules" }
+    if ($p -like "tests/*") { return "tests" }
+    if ($p -like "notebooks/*") { return "notebooks" }
+    if ($p -like "data/*") { return "ground-truth-data" }
+    if ($p -like "figures/*") { return "figures" }
+    if ($p -like "logs/*") { return "training-logs" }
+    if ($p -like "models/*") { return "model-weights" }
+    if ($p -like "report/*" -or $p -eq "README.md") { return "documentation" }
+    if ($p -like "scripts/*") { return "history-tooling" }
+    return "project-files"
+}
+
+function Get-SafeBranchName {
+    param(
+        [int] $Index,
+        [string] $Topic
+    )
+    $slug = ($Topic.ToLowerInvariant() -replace "[^a-z0-9]+", "-").Trim("-")
+    return ("feature/{0:D3}-{1}" -f $Index, $slug)
+}
+
+function Get-CommitMessage {
+    param([object] $Chunk)
+    $label = [string] $Chunk.Label
+    if ($label.Length -gt 70) {
+        $label = $label.Substring(0, 70).Trim()
+    }
+    return $label
+}
+
+function Get-PlannedUnitCount {
+    param(
+        [int] $MinimumTotalCommits,
+        [int] $CommitsPerFeatureBranch
+    )
+    for ($n = 1; $n -lt 10000; $n++) {
+        $branchUnits = [Math]::Max(0, $n - 2)
+        $mergeCount = [int] [Math]::Ceiling($branchUnits / [double] $CommitsPerFeatureBranch)
+        $total = $n + $mergeCount
+        if ($total -ge $MinimumTotalCommits) {
+            return $n
+        }
+    }
+    throw "Unable to calculate a commit unit count."
+}
+
+function Get-CommitUnitLabel {
+    param([object[]] $Group)
+    if ($Group.Count -eq 1) {
+        return [string] $Group[0].Label
+    }
+    $firstPath = [string] $Group[0].Path
+    $samePath = $true
+    foreach ($chunk in $Group) {
+        if ([string] $chunk.Path -ne $firstPath) {
+            $samePath = $false
+            break
+        }
+    }
+    if ($samePath) {
+        $stem = [System.IO.Path]::GetFileNameWithoutExtension($firstPath)
+        if ([string]::IsNullOrWhiteSpace($stem)) {
+            $stem = [System.IO.Path]::GetFileName($firstPath)
+        }
+        return "Expand $stem"
+    }
+    return "Build $(Get-BranchTopic $firstPath)"
+}
+
+function New-CommitUnits {
+    param(
+        [object[]] $Chunks,
+        [int] $DesiredUnitCount
+    )
+    if ($DesiredUnitCount -ge $Chunks.Count) {
+        $units = New-Object "System.Collections.Generic.List[object]"
+        $idx = 1
+        foreach ($chunk in $Chunks) {
+            $units.Add([pscustomobject] @{
+                Chunks = @($chunk)
+                Path = [string] $chunk.Path
+                Label = [string] $chunk.Label
+                UnitIndex = $idx
+            })
+            $idx++
+        }
+        return $units.ToArray()
+    }
+
+    $packed = New-Object "System.Collections.Generic.List[object]"
+    $totalChunks = $Chunks.Count
+    for ($i = 0; $i -lt $DesiredUnitCount; $i++) {
+        $start = [int] [Math]::Floor($i * $totalChunks / [double] $DesiredUnitCount)
+        $endExclusive = [int] [Math]::Floor(($i + 1) * $totalChunks / [double] $DesiredUnitCount)
+        if ($endExclusive -le $start) { $endExclusive = $start + 1 }
+        $group = @()
+        for ($j = $start; $j -lt $endExclusive; $j++) {
+            $group += $Chunks[$j]
+        }
+        $packed.Add([pscustomobject] @{
+            Chunks = $group
+            Path = [string] $group[0].Path
+            Label = Get-CommitUnitLabel -Group $group
+            UnitIndex = $i + 1
+        })
+    }
+    return $packed.ToArray()
+}
+
+function Copy-SnapshotFile {
+    param(
+        [string] $BackupRoot,
+        [string] $RelativePath
+    )
+    $source = Join-Path $BackupRoot ($RelativePath -replace "/", [System.IO.Path]::DirectorySeparatorChar)
+    $target = Join-RepoPath $RelativePath
+    $targetDir = Split-Path -Parent $target
+    if ($targetDir -and -not (Test-Path -LiteralPath $targetDir)) {
+        New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+    }
+    Copy-Item -LiteralPath $source -Destination $target -Force
+}
+
+function Write-TextBuffer {
+    param(
+        [string] $RelativePath,
+        [string[]] $Lines
+    )
+    $target = Join-RepoPath $RelativePath
+    $targetDir = Split-Path -Parent $target
+    if ($targetDir -and -not (Test-Path -LiteralPath $targetDir)) {
+        New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+    }
+    $text = [string]::Join([Environment]::NewLine, $Lines)
+    [System.IO.File]::WriteAllText($target, $text, $script:Utf8NoBom)
+}
+
+function Apply-Chunk {
+    param(
+        [object] $Chunk,
+        [string] $BackupRoot,
+        [hashtable] $State
+    )
+    $path = [string] $Chunk.Path
+    if ($Chunk.Kind -eq "text") {
+        if (-not $State.TextBuffers.ContainsKey($path)) {
+            $State.TextBuffers[$path] = New-Object "System.Collections.Generic.List[string]"
+        }
+        foreach ($line in @($Chunk.Lines)) {
+            $State.TextBuffers[$path].Add([string] $line)
+        }
+        Write-TextBuffer -RelativePath $path -Lines $State.TextBuffers[$path].ToArray()
+    }
+    elseif ($Chunk.Kind -eq "notebook-cell") {
+        if (-not $State.NotebookCells.ContainsKey($path)) {
+            $State.NotebookCells[$path] = New-Object "System.Collections.Generic.List[object]"
+        }
+        $State.NotebookCells[$path].Add($Chunk.Cell)
+        $target = Join-RepoPath $path
+        $targetDir = Split-Path -Parent $target
+        if ($targetDir -and -not (Test-Path -LiteralPath $targetDir)) {
+            New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+        }
+        $notebook = $Chunk.Template | ConvertTo-Json -Depth 100 | ConvertFrom-Json
+        $notebook.cells = $State.NotebookCells[$path].ToArray()
+        $json = $notebook | ConvertTo-Json -Depth 100
+        [System.IO.File]::WriteAllText($target, $json + [Environment]::NewLine, $script:Utf8NoBom)
+    }
+    else {
+        Copy-SnapshotFile -BackupRoot $BackupRoot -RelativePath $path
+    }
+}
