@@ -644,3 +644,169 @@ function Apply-Chunk {
         Copy-SnapshotFile -BackupRoot $BackupRoot -RelativePath $path
     }
 }
+
+function New-Snapshot {
+    param([string[]] $Files)
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $backupRoot = Join-Path ([System.IO.Path]::GetTempPath()) "pinn-nlse-history-backup-$stamp"
+    New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
+
+    $manifest = New-Object "System.Collections.Generic.List[object]"
+    foreach ($file in $Files) {
+        $source = Join-RepoPath $file
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+            throw "Candidate file is missing before snapshot: $file"
+        }
+        $destination = Join-Path $backupRoot ($file -replace "/", [System.IO.Path]::DirectorySeparatorChar)
+        $destinationDir = Split-Path -Parent $destination
+        if ($destinationDir -and -not (Test-Path -LiteralPath $destinationDir)) {
+            New-Item -ItemType Directory -Path $destinationDir -Force | Out-Null
+        }
+        Copy-Item -LiteralPath $source -Destination $destination -Force
+        $hash = Get-FileHash -LiteralPath $source -Algorithm SHA256
+        $item = Get-Item -LiteralPath $source
+        $manifest.Add([pscustomobject] @{
+            Path = $file
+            Hash = $hash.Hash
+            Length = $item.Length
+        })
+    }
+    return [pscustomobject] @{
+        Root = $backupRoot
+        Manifest = $manifest.ToArray()
+    }
+}
+
+function Remove-ReconstructedFiles {
+    param([string[]] $Files)
+    foreach ($file in $Files) {
+        $target = Join-RepoPath $file
+        if (Test-Path -LiteralPath $target -PathType Leaf) {
+            Remove-Item -LiteralPath $target -Force
+        }
+    }
+}
+
+function Sync-SnapshotToWorktree {
+    param(
+        [string] $BackupRoot,
+        [string[]] $Files
+    )
+    foreach ($file in $Files) {
+        Copy-SnapshotFile -BackupRoot $BackupRoot -RelativePath $file
+    }
+}
+
+function Test-ManifestMatches {
+    param([object[]] $Manifest)
+    $mismatches = @()
+    foreach ($entry in $Manifest) {
+        $target = Join-RepoPath $entry.Path
+        if (-not (Test-Path -LiteralPath $target -PathType Leaf)) {
+            $mismatches += "Missing: $($entry.Path)"
+            continue
+        }
+        $hash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
+        if ($hash -ne $entry.Hash) {
+            $mismatches += "Hash mismatch: $($entry.Path)"
+        }
+    }
+    if ($mismatches.Count -gt 0) {
+        throw ("Final state verification failed:`n" + ($mismatches -join [Environment]::NewLine))
+    }
+}
+
+function Get-GitStatusText {
+    $status = Invoke-GitOutput -Arguments @("status", "--short")
+    return ($status | Out-String).Trim()
+}
+
+function Get-StatusHasChanges {
+    $status = @(Invoke-GitOutput -Arguments @("status", "--porcelain"))
+    return ($status.Count -gt 0)
+}
+
+function Assert-GitIdentity {
+    $name = (Invoke-GitOutput -Arguments @("config", "--global", "user.name") | Select-Object -First 1)
+    $email = (Invoke-GitOutput -Arguments @("config", "--global", "user.email") | Select-Object -First 1)
+    if (-not $name -or -not $email) {
+        throw "Global Git user.name and user.email must be configured before rebuilding history."
+    }
+    if ($ExpectedAuthorName -and $name -ne $ExpectedAuthorName) {
+        throw "Global Git user.name is '$name', expected '$ExpectedAuthorName'."
+    }
+    Write-Info "Using global Git identity: $name <$email>"
+}
+
+function Show-PlanSummary {
+    param(
+        [string[]] $Files,
+        [object[]] $CommitUnits,
+        [int] $RealChunkCount,
+        [int] $InitialCommitCount,
+        [int] $BranchMergeCount,
+        [int] $TotalPlannedCommits,
+        [datetime[]] $Dates
+    )
+    Write-Host "DRY RUN: no files or Git history were modified."
+    Write-Host "Repo root: $script:RepoRoot"
+    Write-Host "Files selected: $($Files.Count)"
+    Write-Host "Real file chunks: $RealChunkCount"
+    Write-Host "Planned chunk commits: $($CommitUnits.Count)"
+    Write-Host "Initial direct commits: $InitialCommitCount"
+    Write-Host "Planned branch merges: $BranchMergeCount"
+    Write-Host "Total planned commits: $TotalPlannedCommits"
+    Write-Host "Timeline start: $($Dates[0].ToString('yyyy-MM-dd HH:mm:ss')) $TimezoneOffset"
+    Write-Host "Timeline end:   $($Dates[$Dates.Count - 1].ToString('yyyy-MM-dd HH:mm:ss')) $TimezoneOffset"
+    Write-Host ""
+    Write-Host "First 12 planned chunks:"
+    $CommitUnits | Select-Object -First 12 | ForEach-Object {
+        Write-Host ("  - {0}: {1}" -f $_.Path, $_.Label)
+    }
+}
+
+if (-not $DryRun -and -not $Force) {
+    Write-Host "Refusing to rebuild history without -Force. Re-run with -DryRun to preview or -Force to delete .git and reconstruct."
+    exit 2
+}
+
+if ($EndDate -le $StartDate) {
+    throw "EndDate must be later than StartDate."
+}
+if ($CommitsPerBranch -lt 1) {
+    throw "CommitsPerBranch must be at least 1."
+}
+if ($MinimumCommits -lt 1) {
+    throw "MinimumCommits must be at least 1."
+}
+
+$gitVersion = @(Invoke-GitOutput -Arguments @("--version"))
+if ($gitVersion.Count -eq 0) {
+    throw "git is required but was not found on PATH."
+}
+
+$files = @(Get-CandidateFiles)
+if ($files.Count -eq 0) {
+    throw "No project files found to reconstruct."
+}
+
+$snapshot = New-Snapshot -Files $files
+$cleanupBackup = $false
+try {
+    $chunks = @(New-ReconstructionChunks -Files $files -BackupRoot $snapshot.Root -MaxLinesPerChunk 12)
+    if ($chunks.Count -lt $MinimumCommits) {
+        $chunks = @(New-ReconstructionChunks -Files $files -BackupRoot $snapshot.Root -MaxLinesPerChunk 1)
+    }
+    if ($chunks.Count -lt $MinimumCommits) {
+        throw "Only $($chunks.Count) real chunks were found, below requested minimum $MinimumCommits."
+    }
+
+    $desiredUnits = Get-PlannedUnitCount -MinimumTotalCommits $MinimumCommits -CommitsPerFeatureBranch $CommitsPerBranch
+    $commitUnits = @(New-CommitUnits -Chunks $chunks -DesiredUnitCount $desiredUnits)
+    $initialUnits = @($commitUnits | Select-Object -First 1)
+    $finalUnits = @($commitUnits | Select-Object -Last 1)
+    $branchUnitCount = [Math]::Max(0, $commitUnits.Count - 2)
+    if ($branchUnitCount -gt 0) {
+        $branchUnits = @($commitUnits | Select-Object -Skip 1 | Select-Object -First $branchUnitCount)
+    }
+    else {
