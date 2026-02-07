@@ -720,3 +720,93 @@ function Get-GitStatusText {
     $status = Invoke-GitOutput -Arguments @("status", "--short")
     return ($status | Out-String).Trim()
 }
+
+function Get-StatusHasChanges {
+    $status = @(Invoke-GitOutput -Arguments @("status", "--porcelain"))
+    return ($status.Count -gt 0)
+}
+
+function Assert-GitIdentity {
+    $name = (Invoke-GitOutput -Arguments @("config", "--global", "user.name") | Select-Object -First 1)
+    $email = (Invoke-GitOutput -Arguments @("config", "--global", "user.email") | Select-Object -First 1)
+    if (-not $name -or -not $email) {
+        throw "Global Git user.name and user.email must be configured before rebuilding history."
+    }
+    if ($ExpectedAuthorName -and $name -ne $ExpectedAuthorName) {
+        throw "Global Git user.name is '$name', expected '$ExpectedAuthorName'."
+    }
+    Write-Info "Using global Git identity: $name <$email>"
+}
+
+function Show-PlanSummary {
+    param(
+        [string[]] $Files,
+        [object[]] $CommitUnits,
+        [int] $RealChunkCount,
+        [int] $InitialCommitCount,
+        [int] $BranchMergeCount,
+        [int] $TotalPlannedCommits,
+        [datetime[]] $Dates
+    )
+    Write-Host "DRY RUN: no files or Git history were modified."
+    Write-Host "Repo root: $script:RepoRoot"
+    Write-Host "Files selected: $($Files.Count)"
+    Write-Host "Real file chunks: $RealChunkCount"
+    Write-Host "Planned chunk commits: $($CommitUnits.Count)"
+    Write-Host "Initial direct commits: $InitialCommitCount"
+    Write-Host "Planned branch merges: $BranchMergeCount"
+    Write-Host "Total planned commits: $TotalPlannedCommits"
+    Write-Host "Timeline start: $($Dates[0].ToString('yyyy-MM-dd HH:mm:ss')) $TimezoneOffset"
+    Write-Host "Timeline end:   $($Dates[$Dates.Count - 1].ToString('yyyy-MM-dd HH:mm:ss')) $TimezoneOffset"
+    Write-Host ""
+    Write-Host "First 12 planned chunks:"
+    $CommitUnits | Select-Object -First 12 | ForEach-Object {
+        Write-Host ("  - {0}: {1}" -f $_.Path, $_.Label)
+    }
+}
+
+if (-not $DryRun -and -not $Force) {
+    Write-Host "Refusing to rebuild history without -Force. Re-run with -DryRun to preview or -Force to delete .git and reconstruct."
+    exit 2
+}
+
+if ($EndDate -le $StartDate) {
+    throw "EndDate must be later than StartDate."
+}
+if ($CommitsPerBranch -lt 1) {
+    throw "CommitsPerBranch must be at least 1."
+}
+if ($MinimumCommits -lt 1) {
+    throw "MinimumCommits must be at least 1."
+}
+
+$gitVersion = @(Invoke-GitOutput -Arguments @("--version"))
+if ($gitVersion.Count -eq 0) {
+    throw "git is required but was not found on PATH."
+}
+
+$files = @(Get-CandidateFiles)
+if ($files.Count -eq 0) {
+    throw "No project files found to reconstruct."
+}
+
+$snapshot = New-Snapshot -Files $files
+$cleanupBackup = $false
+try {
+    $chunks = @(New-ReconstructionChunks -Files $files -BackupRoot $snapshot.Root -MaxLinesPerChunk 12)
+    if ($chunks.Count -lt $MinimumCommits) {
+        $chunks = @(New-ReconstructionChunks -Files $files -BackupRoot $snapshot.Root -MaxLinesPerChunk 1)
+    }
+    if ($chunks.Count -lt $MinimumCommits) {
+        throw "Only $($chunks.Count) real chunks were found, below requested minimum $MinimumCommits."
+    }
+
+    $desiredUnits = Get-PlannedUnitCount -MinimumTotalCommits $MinimumCommits -CommitsPerFeatureBranch $CommitsPerBranch
+    $commitUnits = @(New-CommitUnits -Chunks $chunks -DesiredUnitCount $desiredUnits)
+    $initialUnits = @($commitUnits | Select-Object -First 1)
+    $finalUnits = @($commitUnits | Select-Object -Last 1)
+    $branchUnitCount = [Math]::Max(0, $commitUnits.Count - 2)
+    if ($branchUnitCount -gt 0) {
+        $branchUnits = @($commitUnits | Select-Object -Skip 1 | Select-Object -First $branchUnitCount)
+    }
+    else {
