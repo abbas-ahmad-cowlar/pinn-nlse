@@ -644,3 +644,79 @@ function Apply-Chunk {
         Copy-SnapshotFile -BackupRoot $BackupRoot -RelativePath $path
     }
 }
+
+function New-Snapshot {
+    param([string[]] $Files)
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $backupRoot = Join-Path ([System.IO.Path]::GetTempPath()) "pinn-nlse-history-backup-$stamp"
+    New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
+
+    $manifest = New-Object "System.Collections.Generic.List[object]"
+    foreach ($file in $Files) {
+        $source = Join-RepoPath $file
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+            throw "Candidate file is missing before snapshot: $file"
+        }
+        $destination = Join-Path $backupRoot ($file -replace "/", [System.IO.Path]::DirectorySeparatorChar)
+        $destinationDir = Split-Path -Parent $destination
+        if ($destinationDir -and -not (Test-Path -LiteralPath $destinationDir)) {
+            New-Item -ItemType Directory -Path $destinationDir -Force | Out-Null
+        }
+        Copy-Item -LiteralPath $source -Destination $destination -Force
+        $hash = Get-FileHash -LiteralPath $source -Algorithm SHA256
+        $item = Get-Item -LiteralPath $source
+        $manifest.Add([pscustomobject] @{
+            Path = $file
+            Hash = $hash.Hash
+            Length = $item.Length
+        })
+    }
+    return [pscustomobject] @{
+        Root = $backupRoot
+        Manifest = $manifest.ToArray()
+    }
+}
+
+function Remove-ReconstructedFiles {
+    param([string[]] $Files)
+    foreach ($file in $Files) {
+        $target = Join-RepoPath $file
+        if (Test-Path -LiteralPath $target -PathType Leaf) {
+            Remove-Item -LiteralPath $target -Force
+        }
+    }
+}
+
+function Sync-SnapshotToWorktree {
+    param(
+        [string] $BackupRoot,
+        [string[]] $Files
+    )
+    foreach ($file in $Files) {
+        Copy-SnapshotFile -BackupRoot $BackupRoot -RelativePath $file
+    }
+}
+
+function Test-ManifestMatches {
+    param([object[]] $Manifest)
+    $mismatches = @()
+    foreach ($entry in $Manifest) {
+        $target = Join-RepoPath $entry.Path
+        if (-not (Test-Path -LiteralPath $target -PathType Leaf)) {
+            $mismatches += "Missing: $($entry.Path)"
+            continue
+        }
+        $hash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
+        if ($hash -ne $entry.Hash) {
+            $mismatches += "Hash mismatch: $($entry.Path)"
+        }
+    }
+    if ($mismatches.Count -gt 0) {
+        throw ("Final state verification failed:`n" + ($mismatches -join [Environment]::NewLine))
+    }
+}
+
+function Get-GitStatusText {
+    $status = Invoke-GitOutput -Arguments @("status", "--short")
+    return ($status | Out-String).Trim()
+}
