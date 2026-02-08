@@ -810,3 +810,109 @@ try {
         $branchUnits = @($commitUnits | Select-Object -Skip 1 | Select-Object -First $branchUnitCount)
     }
     else {
+        $branchUnits = @()
+    }
+    $branchMergeCount = [int] [Math]::Ceiling($branchUnits.Count / [double] $CommitsPerBranch)
+    $totalPlannedCommits = $commitUnits.Count + $branchMergeCount
+    $dates = @(New-CommitDates -Count $totalPlannedCommits -Start $StartDate -End $EndDate -RandomSeed $Seed)
+
+    if ($DryRun) {
+        $cleanupBackup = $true
+        Show-PlanSummary `
+            -Files $files `
+            -CommitUnits $commitUnits `
+            -RealChunkCount $chunks.Count `
+            -InitialCommitCount $initialUnits.Count `
+            -BranchMergeCount $branchMergeCount `
+            -TotalPlannedCommits $totalPlannedCommits `
+            -Dates $dates
+        exit 0
+    }
+
+    Assert-GitIdentity
+
+    Write-Info "Snapshot saved to $($snapshot.Root)"
+    Write-Info "Deleting existing .git and initializing fresh repository"
+    $gitDir = Join-Path $script:RepoRoot ".git"
+    if (Test-Path -LiteralPath $gitDir) {
+        Remove-Item -LiteralPath $gitDir -Recurse -Force
+    }
+    Invoke-Git -Arguments @("init") | Out-Null
+    Invoke-Git -Arguments @("branch", "-M", "main") | Out-Null
+
+    Remove-ReconstructedFiles -Files $files
+
+    $state = @{
+        TextBuffers = @{}
+        NotebookCells = @{}
+    }
+    $dateIndex = 0
+
+    foreach ($unit in $initialUnits) {
+        foreach ($chunk in @($unit.Chunks)) {
+            Apply-Chunk -Chunk $chunk -BackupRoot $snapshot.Root -State $state
+        }
+        foreach ($path in @($unit.Chunks | ForEach-Object { $_.Path } | Sort-Object -Unique)) {
+            Invoke-Git -Arguments @("add", "--", $path) | Out-Null
+        }
+    }
+    Invoke-DatedGit -Arguments @("commit", "-m", "Initialize project scaffold") -When $dates[$dateIndex]
+    $dateIndex++
+
+    $branchIndex = 1
+    for ($offset = 0; $offset -lt $branchUnits.Count; $offset += $CommitsPerBranch) {
+        $take = [Math]::Min($CommitsPerBranch, $branchUnits.Count - $offset)
+        $group = @($branchUnits | Select-Object -Skip $offset -First $take)
+        $topic = Get-BranchTopic $group[0].Path
+        $branchName = Get-SafeBranchName -Index $branchIndex -Topic $topic
+
+        Invoke-Git -Arguments @("checkout", "main") | Out-Null
+        Invoke-Git -Arguments @("checkout", "-b", $branchName) | Out-Null
+
+        foreach ($unit in $group) {
+            foreach ($chunk in @($unit.Chunks)) {
+                Apply-Chunk -Chunk $chunk -BackupRoot $snapshot.Root -State $state
+            }
+            foreach ($path in @($unit.Chunks | ForEach-Object { $_.Path } | Sort-Object -Unique)) {
+                Invoke-Git -Arguments @("add", "--", $path) | Out-Null
+            }
+            Invoke-DatedGit -Arguments @("commit", "-m", (Get-CommitMessage $unit)) -When $dates[$dateIndex]
+            $dateIndex++
+        }
+
+        Invoke-Git -Arguments @("checkout", "main") | Out-Null
+        Invoke-DatedGit -Arguments @("merge", "--no-ff", $branchName, "-m", "Merge $branchName") -When $dates[$dateIndex]
+        $dateIndex++
+        $branchIndex++
+    }
+
+    foreach ($unit in $finalUnits) {
+        foreach ($chunk in @($unit.Chunks)) {
+            Apply-Chunk -Chunk $chunk -BackupRoot $snapshot.Root -State $state
+        }
+    }
+    Sync-SnapshotToWorktree -BackupRoot $snapshot.Root -Files $files
+    Invoke-Git -Arguments @("add", "-A", "--", ".") | Out-Null
+    Invoke-DatedGit -Arguments @("commit", "-m", "Finalize reconstructed project state") -When $dates[$dates.Count - 1]
+
+    Test-ManifestMatches -Manifest $snapshot.Manifest
+    $cleanupBackup = $true
+    $statusText = Get-GitStatusText
+    if ($statusText) {
+        Write-Info "Final Git status has remaining ignored/untracked output:"
+        Write-Host $statusText
+    }
+    else {
+        Write-Info "Final Git status is clean."
+    }
+
+    Write-Info "Rebuilt history with $totalPlannedCommits commits from $($StartDate.ToString('yyyy-MM-dd')) to $($EndDate.ToString('yyyy-MM-dd'))."
+}
+finally {
+    if (-not $KeepBackup -and $cleanupBackup -and $snapshot -and (Test-Path -LiteralPath $snapshot.Root)) {
+        Remove-Item -LiteralPath $snapshot.Root -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    elseif ($snapshot -and (Test-Path -LiteralPath $snapshot.Root)) {
+        Write-Info "Backup retained at $($snapshot.Root)"
+    }
+}
