@@ -86,7 +86,8 @@ and the saved SSFM ground truth, then renders the comparison figures and
 prints the metrics. No retraining.
 
 ```bash
-git clone <repo> && cd 3-PINN_NLSE
+git clone https://github.com/abbas-ahmad-cowlar/pinn-nlse.git
+cd pinn-nlse
 python -m venv venv && . venv/Scripts/activate   # Windows
 # or: source venv/bin/activate                   # Unix / macOS
 pip install -r requirements.txt
